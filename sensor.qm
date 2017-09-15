@@ -1,0 +1,372 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<model version="4.0.3" links="0">
+ <framework name="qpn"/>
+ <package name="AOs" stereotype="0x02">
+  <class name="Sensor" superclass="qpn::QActive">
+   <attribute name="sensor_data[SENSOR_COUNT][MESSAGE_SIZE]" type="uint8_t" visibility="0x02" properties="0x00"/>
+   <statechart>
+    <initial target="../2">
+     <initial_glyph conn="46,7,5,0,34,17">
+      <action box="0,-2,10,2"/>
+     </initial_glyph>
+    </initial>
+    <state name="Active">
+     <entry brief="Activate peripheral power">#ifdef TRACE
+  Serial.println(&quot;Enter Active&quot;);
+#endif
+
+digitalWrite(PERIPH_VCC_PIN, 1);
+digitalWrite(LED_PIN, 1);
+
+// http://www.ti.com/lit/ds/symlink/lm35.pdf p.12 
+// (startup response)
+delay(30);
+</entry>
+     <exit>#ifdef TRACE
+    Serial.println(&quot;Exit Active&quot;);
+#endif
+digitalWrite(LED_PIN, 0);</exit>
+     <initial target="../4">
+      <initial_glyph conn="21,22,5,0,14,3">
+       <action box="0,-2,10,2"/>
+      </initial_glyph>
+     </initial>
+     <tran trig="SLEEP" target="../../2">
+      <tran_glyph conn="54,32,1,3,14">
+       <action box="5,-3,10,2"/>
+      </tran_glyph>
+     </tran>
+     <tran trig="SEND_DATA" target="../5">
+      <tran_glyph conn="9,42,3,3,13">
+       <action box="1,-3,12,2"/>
+      </tran_glyph>
+     </tran>
+     <tran trig="EMISSION_FINISHED">
+      <action>QACTIVE_POST(&amp;me-&gt;super, SLEEP_SIG, me-&gt;super.prio);</action>
+      <tran_glyph conn="9,54,3,-1,26">
+       <action box="2,-3,17,2"/>
+      </tran_glyph>
+     </tran>
+     <state name="TempSensing">
+      <entry brief="Setup sensing">#ifdef TRACE
+  Serial.println(F(&quot;Enter TempSensing&quot;));
+#endif
+
+double analogVal = 0;
+int sample = 0;
+
+// first read is usually false 
+// make a blank read
+analogRead(ANALOG_TEMP_SENSOR_PIN);
+
+// message length is fixed
+me-&gt;sensor_data[TEMP_SENSOR_ID][MESSAGE_SIZE_POS] = MESSAGE_SIZE;
+
+for (uint8_t j = 0 ; j &lt; TEMP_SAMPLE_COUNT ; ++j)
+{
+  sample = analogRead(ANALOG_TEMP_SENSOR_PIN);    // Each sample is a value from 0 to 1023. Reading &quot;j&quot; values will help making the reading more accurate.
+  analogVal = analogVal + sample;
+}
+
+analogVal = analogVal / TEMP_SAMPLE_COUNT;
+
+// see https://playground.arduino.cc/Main/LM35HigherResolution
+// we divide the factor by 10 more to avoid a multiplication per 10
+// before rounding for i_temp, below
+// the value is adjusted with Aref value for each sensor module.
+//
+// Node 0 : 1.0.87v
+//
+analogVal = analogVal / 0.9568;
+
+// fix value by calibration
+//analogVal = analogVal * span + offset; 
+
+// rounding and split decimal part
+// analogVal 263.90
+int i_temp = round(analogVal); // temp is int plus one decimal (ie raw 263.90 =&gt; 264)
+me-&gt;sensor_data[TEMP_SENSOR_ID][SENSOR_BYTE_1_POS] = round(i_temp / 10); // ie 26 in this sample
+me-&gt;sensor_data[TEMP_SENSOR_ID][SENSOR_BYTE_2_POS] = round(i_temp % 10); // ie 4 in this sample
+
+Serial.print(me-&gt;sensor_data[TEMP_SENSOR_ID][SENSOR_BYTE_1_POS]);
+Serial.print(F(&quot;.&quot;));
+Serial.print(me-&gt;sensor_data[TEMP_SENSOR_ID][SENSOR_BYTE_2_POS]);
+Serial.println(F(&quot; °C&quot;));
+
+digitalWrite(LED_PIN, 0);
+
+QACTIVE_POST(&amp;me-&gt;super, SEND_DATA_SIG, me-&gt;super.prio);</entry>
+      <exit>#ifdef TRACE
+    Serial.println(F(&quot;Exit TempSensing&quot;));
+#endif
+</exit>
+      <state_glyph node="26,25,27,6">
+       <entry box="1,2,23,2"/>
+       <exit box="1,4,6,2"/>
+      </state_glyph>
+     </state>
+     <state name="Emitting">
+      <entry brief="Transmit all sensors information">#ifdef TRACE
+    Serial.println(F(&quot;Enter Emitting&quot;));
+#endif
+
+man.transmitArray(me-&gt;sensor_data[0][0], me-&gt;sensor_data[0]);
+delay(10);
+
+man.transmitArray(me-&gt;sensor_data[0][0], me-&gt;sensor_data[0]);
+delay(10);
+
+man.transmitArray(me-&gt;sensor_data[0][0], me-&gt;sensor_data[0]);
+delay(10);
+
+QACTIVE_POST(&amp;me-&gt;super, EMISSION_FINISHED_SIG, me-&gt;super.prio);</entry>
+      <exit>// not needed in transmit mode
+// QACTIVE_POST(AO_Timer, QP_CLOCK, AO_Timer.prio);
+
+#ifdef TRACE
+    Serial.println(F(&quot;Exit Emitting&quot;));
+#endif</exit>
+      <state_glyph node="22,38,30,11">
+       <entry box="1,2,26,3"/>
+       <exit box="1,5,6,2"/>
+      </state_glyph>
+     </state>
+     <state_glyph node="9,16,45,47">
+      <entry box="1,2,22,2"/>
+      <exit box="1,4,6,3"/>
+     </state_glyph>
+    </state>
+    <state name="Sleeping">
+     <entry brief="Cut peripherals power">#ifdef TRACE
+    Serial.println(&quot;Enter Sleeping&quot;);
+#endif
+digitalWrite(PERIPH_VCC_PIN, 0);
+QActive_armX(&amp;me-&gt;super, 0U, BSP_TICKS_PER_SEC*5U, 0U);</entry>
+     <exit>#ifdef TRACE
+    Serial.println(&quot;Exit Sleeping&quot;);
+#endif
+QActive_disarmX(&amp;me-&gt;super, 0U);
+</exit>
+     <tran trig="Q_TIMEOUT" target="../../1">
+      <tran_glyph conn="68,37,3,1,-14">
+       <action box="-11,-3,10,2"/>
+      </tran_glyph>
+     </tran>
+     <state_glyph node="68,24,24,16">
+      <entry box="1,2,20,2"/>
+      <exit box="1,4,22,2"/>
+     </state_glyph>
+    </state>
+    <state_diagram size="147,82"/>
+   </statechart>
+  </class>
+ </package>
+ <directory name=".">
+  <file name="sensor.ino" codec="UTF-8">
+   <text>#define ISR_HACK 1
+
+#include &quot;qpn.h&quot;        // QP-nano framework
+#include &quot;Arduino.h&quot;    // Arduino API
+#include &quot;Manchester.h&quot; // 433Mhz transmission library
+
+//#include &lt;avr/sleep.h&gt;
+
+Q_DEFINE_THIS_MODULE(&quot;sensor&quot;)
+
+
+
+
+// define to println() many information
+//#define TRACE 1
+
+enum {
+    BSP_TICKS_PER_SEC = 100,  // number of system clock ticks in one second
+    LED_PIN           = 13,  // the pin number of the on-board LED
+    PERIPH_VCC_PIN    = 10,  // the pin number which activates the vcc rail for peripherals (emitter, sensors)
+    SENSOR_COUNT      = 1,   // How many sensors do we have, ie how many data row to send
+
+    /*
+    * The length (bytes) of each sensor data.
+    *
+    * [MESSAGE_SIZE, DEV_ID, SENSOR_ID, SENSOR_BYTE_1, SENSOR_BYTE_2]
+    *
+    */
+    MESSAGE_SIZE      = 5
+};
+
+// protocol definition, should 
+// be shared with receiver
+enum {
+    MESSAGE_SIZE_POS,
+    DEV_ID_POS,
+    SENSOR_ID_POS,
+    SENSOR_BYTE_1_POS,
+    SENSOR_BYTE_2_POS
+};
+
+uint8_t TEMP_SENSOR_ID= 0x0;
+
+// ------------ 
+
+// THIS sensor config
+#define SENSOR_COUNT 1
+
+// pin where temp sensor is wired
+
+// some constant for temperature sensor
+#define ANALOG_TEMP_SENSOR_PIN A0
+const uint8_t TEMP_SAMPLE_COUNT = 10;
+
+// constants for 433Mhz emitter
+#define TX_PIN  5 //pin where your transmitter is connected
+
+//============================================================================
+enum SensorSignals {
+    SEND_DATA_SIG = Q_USER_SIG,
+    EMISSION_FINISHED_SIG,
+    SLEEP_SIG,
+    WAKEUP_SIG,
+
+};
+
+$declare(AOs::Sensor)
+$define(AOs::Sensor)
+
+Sensor AO_Sensor;
+
+// QF_active[] array defines all active object control blocks ----------------
+static QEvt l_sensorQSto[10]; // Event queue storage for Sensor
+
+QActiveCB const Q_ROM QF_active[] = {
+  { (QActive *)0,           (QEvt *)0,        0U                  },
+  { (QActive *)&amp;AO_Sensor,  l_sensorQSto,     Q_DIM(l_sensorQSto) }
+};
+
+void PrintSensorData()
+{
+    Serial.println(F(&quot;Temp sensor data: &quot;));
+    Serial.print(&quot;Size: &quot;) ; Serial.println(AO_Sensor.sensor_data[TEMP_SENSOR_ID][MESSAGE_SIZE_POS]);
+    Serial.print(&quot;Dev. Id: &quot;) ; Serial.println(AO_Sensor.sensor_data[TEMP_SENSOR_ID][DEV_ID_POS]);
+    Serial.print(&quot;Sensor Id: &quot;) ; Serial.println(AO_Sensor.sensor_data[TEMP_SENSOR_ID][SENSOR_ID_POS]);
+    Serial.print(&quot;First byte: &quot;) ; Serial.println(AO_Sensor.sensor_data[TEMP_SENSOR_ID][SENSOR_BYTE_1_POS]);
+    Serial.print(&quot;Second byte: &quot;) ; Serial.println(AO_Sensor.sensor_data[TEMP_SENSOR_ID][SENSOR_BYTE_2_POS]);
+
+}
+
+void PrintInfo()
+{
+    Serial.print(F(&quot;QP-nano: &quot;));
+    Serial.println(F(QP_VERSION_STR));
+
+    Serial.print(&quot;CPU Freq: &quot;);
+    Serial.print(F_CPU / 1000000);
+    Serial.println(&quot;Mhz&quot;);
+
+    Serial.print(&quot;State machine ticks/s: &quot;);
+    Serial.println(BSP_TICKS_PER_SEC);
+
+    Serial.print(&quot;433Mhz baud rate: &quot;);
+    Serial.print(&quot;MAN_4800&quot;);
+    Serial.println(&quot;bps&quot;);
+}
+
+//............................................................................
+void setup() {
+
+    analogReference(INTERNAL);
+
+    pinMode(LED_PIN, OUTPUT);        // set the LED-PIN pin to output
+    digitalWrite(LED_PIN, 0);
+
+    pinMode(PERIPH_VCC_PIN, OUTPUT);
+    digitalWrite(PERIPH_VCC_PIN, 0);
+
+    man.setupTransmit(TX_PIN, MAN_4800);
+
+    Serial.begin(57600);   // set the highest stanard baud rate of 115200 bps (mini pro uses x2)
+
+    PrintInfo();
+
+    // initialize the QF-nano framework
+    QF_init(Q_DIM(QF_active));
+    QActive_ctor(&amp;AO_Sensor.super, Q_STATE_CAST(&amp;Sensor_initial));
+
+}
+
+//
+void loop() {
+    QF_run(); // run the QP-nano application
+}
+
+ISR(TIMER2_COMPA_vect) {
+    if (Serial.available() &gt; 0) {
+        switch (Serial.read()) { // read the incoming byte
+            case 'p':
+            case 'P':
+            {
+               PrintInfo(); 
+               break;
+            }
+            case 'd':
+            case 'D':
+            {
+               PrintSensorData();
+               break;
+            }
+       }
+    }
+
+    QF_tickXISR(0);
+
+}
+
+//============================================================================
+
+// QF callbacks...
+void QF_onStartup(void) {
+
+#ifdef TRACE
+    Serial.println(F(&quot;QF_onStartup&quot;));
+#endif
+
+    // set Timer2 in CTC mode, 1/1024 prescaler, start the timer ticking...
+    TCCR2A = (1U &lt;&lt; WGM21) | (0U &lt;&lt; WGM20);
+    TCCR2B = (1U &lt;&lt; CS22 ) | (1U &lt;&lt; CS21) | (1U &lt;&lt; CS20); // 1/2^10
+    ASSR  &amp;= ~(1U &lt;&lt; AS2);
+    TIMSK2 = (1U &lt;&lt; OCIE2A); // enable TIMER2 compare Interrupt
+    TCNT2  = 0U;
+
+    // set the output-compare register based on the desired tick frequency
+    OCR2A  = (F_CPU / BSP_TICKS_PER_SEC / 1024U) - 1U;
+}
+
+//............................................................................
+void QV_onIdle(void) {   // called with interrupts DISABLED
+
+#ifdef TRACE
+    //Serial.println(F(&quot;QV_onIdle&quot;));
+#endif
+
+    // Put the CPU and peripherals to the low-power mode. You might
+    // need to customize the clock management for your application,
+    // see the datasheet for your particular AVR MCU.
+    SMCR = (0 &lt;&lt; SM0) | (1 &lt;&lt; SE); // idle mode, adjust to your project
+    QV_CPU_SLEEP();  // atomically go to sleep and enable interrupts
+}
+
+//............................................................................
+void Q_onAssert(char const Q_ROM * const file, int line) {
+
+#ifdef TRACE
+    // implement the error-handling policy for your application!!!
+    Serial.print(F(&quot;Assertion raised in '&quot;));
+    Serial.print(file);
+    Serial.print(F(&quot;' at line&quot;));
+    Serial.print(line);
+#endif
+    QF_INT_DISABLE(); // disable all interrupts
+    QF_RESET();  // reset the CPU
+}</text>
+  </file>
+ </directory>
+</model>
