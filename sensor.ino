@@ -15,69 +15,59 @@
 * for more details.
 *****************************************************************************/
 /*${.::sensor.ino} .........................................................*/
-#define ISR_HACK 1
-
 #include "qpn.h"        // QP-nano framework
 #include "Arduino.h"    // Arduino API
-#include "Manchester.h" // 433Mhz transmission library
+#include "oregon.h" // 433Mhz transmission library
 
-//#include <avr/sleep.h>
+#include <avr/sleep.h>
+#include <avr/wdt.h>
 
 Q_DEFINE_THIS_MODULE("sensor")
-
-
-
 
 // define to println() many information
 //#define TRACE 1
 
 enum {
     BSP_TICKS_PER_SEC = 100,  // number of system clock ticks in one second
-    LED_PIN           = 13,  // the pin number of the on-board LED
+    LED_PIN           = 3,  // the pin number of the on-board LED
     PERIPH_VCC_PIN    = 10,  // the pin number which activates the vcc rail for peripherals (emitter, sensors)
     SENSOR_COUNT      = 1,   // How many sensors do we have, ie how many data row to send
-
-    /*
-    * The length (bytes) of each sensor data.
-    *
-    * [MESSAGE_SIZE, DEV_ID, SENSOR_ID, SENSOR_BYTE_1, SENSOR_BYTE_2]
-    *
-    */
-    MESSAGE_SIZE      = 5
 };
 
-// protocol definition, should
-// be shared with receiver
-enum {
-    MESSAGE_SIZE_POS,
-    DEV_ID_POS,
-    SENSOR_ID_POS,
-    SENSOR_BYTE_1_POS,
-    SENSOR_BYTE_2_POS
-};
-
-uint8_t TEMP_SENSOR_ID= 0x0;
 
 // ------------
 
-// THIS sensor config
-#define SENSOR_COUNT 1
-
-// pin where temp sensor is wired
-
 // some constant for temperature sensor
 #define ANALOG_TEMP_SENSOR_PIN A0
-const uint8_t TEMP_SAMPLE_COUNT = 10;
+const uint8_t TEMP_SAMPLE_COUNT = 16; // 2^4, allow division with bitshift
+// ratio to apply to the raw analog measurement from ADC on LM38
+
+//#define TEMPERATURE_RATIO   1.087 / 1023.0 * 100.0
+
+// see https://playground.arduino.cc/Main/LM35HigherResolution
+#define AREF 1.087
+#define TEMPERATURE_RATIO   10 / (AREF / 1024.0 * 1000)
 
 // constants for 433Mhz emitter
 #define TX_PIN  5 //pin where your transmitter is connected
 
+uint8_t OREGON_TYPE[] = {0x1A,0x2D}; // inside temp
+#define COMMAND_REPEAT_COUNT 5
+#define OREGON_ID 0xBC
+Oregon oregon(LED_PIN, TX_PIN, COMMAND_REPEAT_COUNT);
+Oregon::Message message;
+
+// emit each 5 minutes (how many 8sec watchdog wakeups)
+const uint8_t SLEEP_DELAY_SECOND = (uint8_t)((5*60) / 8);
+volatile uint8_t _sleepDelayCounter = SLEEP_DELAY_SECOND;
+
+
+
 //============================================================================
 enum SensorSignals {
-    SEND_DATA_SIG = Q_USER_SIG,
+    SEND_SIG = Q_USER_SIG,
     EMISSION_FINISHED_SIG,
-    SLEEP_SIG,
-    WAKEUP_SIG,
+    SENSE_SIG,
 
 };
 
@@ -91,22 +81,22 @@ typedef struct Sensor {
 /* protected: */
     QActive super;
 
-/* private: */
-    uint8_t sensor_data[SENSOR_COUNT][MESSAGE_SIZE];
+/* public: */
+    Oregon::Message m_Message;
 } Sensor;
 
 /* protected: */
 static QState Sensor_initial(Sensor * const me);
 static QState Sensor_Active(Sensor * const me);
-static QState Sensor_TempSensing(Sensor * const me);
-static QState Sensor_Emitting(Sensor * const me);
-static QState Sensor_Sleeping(Sensor * const me);
+static QState Sensor_Sensing(Sensor * const me);
+static QState Sensor_Sending(Sensor * const me);
+static QState Sensor_Idle(Sensor * const me);
 
 /*${AOs::Sensor} ...........................................................*/
 /*${AOs::Sensor::SM} .......................................................*/
 static QState Sensor_initial(Sensor * const me) {
     /* ${AOs::Sensor::SM::initial} */
-    return Q_TRAN(&Sensor_Sleeping);
+    return Q_TRAN(&Sensor_Active);
 }
 /*${AOs::Sensor::SM::Active} ...............................................*/
 static QState Sensor_Active(Sensor * const me) {
@@ -118,13 +108,6 @@ static QState Sensor_Active(Sensor * const me) {
               Serial.println("Enter Active");
             #endif
 
-            digitalWrite(PERIPH_VCC_PIN, 1);
-            digitalWrite(LED_PIN, 1);
-
-            // http://www.ti.com/lit/ds/symlink/lm35.pdf p.12
-            // (startup response)
-            delay(30);
-
             status_ = Q_HANDLED();
             break;
         }
@@ -133,29 +116,12 @@ static QState Sensor_Active(Sensor * const me) {
             #ifdef TRACE
                 Serial.println("Exit Active");
             #endif
-            digitalWrite(LED_PIN, 0);
             status_ = Q_HANDLED();
             break;
         }
         /* ${AOs::Sensor::SM::Active::initial} */
         case Q_INIT_SIG: {
-            status_ = Q_TRAN(&Sensor_TempSensing);
-            break;
-        }
-        /* ${AOs::Sensor::SM::Active::SLEEP} */
-        case SLEEP_SIG: {
-            status_ = Q_TRAN(&Sensor_Sleeping);
-            break;
-        }
-        /* ${AOs::Sensor::SM::Active::SEND_DATA} */
-        case SEND_DATA_SIG: {
-            status_ = Q_TRAN(&Sensor_Emitting);
-            break;
-        }
-        /* ${AOs::Sensor::SM::Active::EMISSION_FINISHED} */
-        case EMISSION_FINISHED_SIG: {
-            QACTIVE_POST(&me->super, SLEEP_SIG, me->super.prio);
-            status_ = Q_HANDLED();
+            status_ = Q_TRAN(&Sensor_Sensing);
             break;
         }
         default: {
@@ -165,64 +131,51 @@ static QState Sensor_Active(Sensor * const me) {
     }
     return status_;
 }
-/*${AOs::Sensor::SM::Active::TempSensing} ..................................*/
-static QState Sensor_TempSensing(Sensor * const me) {
+/*${AOs::Sensor::SM::Active::Sensing} ......................................*/
+static QState Sensor_Sensing(Sensor * const me) {
     QState status_;
     switch (Q_SIG(me)) {
-        /* ${AOs::Sensor::SM::Active::TempSensing} */
+        /* ${AOs::Sensor::SM::Active::Sensing} */
         case Q_ENTRY_SIG: {
             #ifdef TRACE
-              Serial.println(F("Enter TempSensing"));
+              Serial.println(F("Enter Sensing"));
             #endif
 
+            digitalWrite(PERIPH_VCC_PIN, HIGH);
+            analogReference(INTERNAL);
+
+            // http://www.ti.com/lit/ds/symlink/lm35.pdf p.12
+            // (startup response)
+            delay(30);
+
+            uint16_t accumulator = 0;
             double analogVal = 0;
-            int sample = 0;
 
             // first read is usually false
             // make a blank read
             analogRead(ANALOG_TEMP_SENSOR_PIN);
 
             // message length is fixed
-            me->sensor_data[TEMP_SENSOR_ID][MESSAGE_SIZE_POS] = MESSAGE_SIZE;
-
             for (uint8_t j = 0 ; j < TEMP_SAMPLE_COUNT ; ++j)
             {
-              sample = analogRead(ANALOG_TEMP_SENSOR_PIN);    // Each sample is a value from 0 to 1023. Reading "j" values will help making the reading more accurate.
-              analogVal = analogVal + sample;
+              accumulator += analogRead(ANALOG_TEMP_SENSOR_PIN);
             }
 
-            analogVal = analogVal / TEMP_SAMPLE_COUNT;
+            analogVal = (accumulator >> 4);
 
-            // see https://playground.arduino.cc/Main/LM35HigherResolution
-            // we divide the factor by 10 more to avoid a multiplication per 10
-            // before rounding for i_temp, below
             // the value is adjusted with Aref value for each sensor module.
-            //
-            // Node 0 : 1.0.87v
-            //
-            analogVal = analogVal / 0.9568;
+            analogVal = analogVal / TEMPERATURE_RATIO;
 
-            // fix value by calibration
-            //analogVal = analogVal * span + offset;
+            me->m_Message.temperature = analogVal;
 
-            // rounding and split decimal part
-            // analogVal 263.90
-            int i_temp = round(analogVal); // temp is int plus one decimal (ie raw 263.90 => 264)
-            me->sensor_data[TEMP_SENSOR_ID][SENSOR_BYTE_1_POS] = round(i_temp / 10); // ie 26 in this sample
-            me->sensor_data[TEMP_SENSOR_ID][SENSOR_BYTE_2_POS] = round(i_temp % 10); // ie 4 in this sample
-
-            Serial.print(me->sensor_data[TEMP_SENSOR_ID][SENSOR_BYTE_1_POS]);
-            Serial.print(F("."));
-            Serial.print(me->sensor_data[TEMP_SENSOR_ID][SENSOR_BYTE_2_POS]);
+            Serial.print(me->m_Message.temperature);
             Serial.println(F(" °C"));
 
-            digitalWrite(LED_PIN, 0);
-
-            QACTIVE_POST(&me->super, SEND_DATA_SIG, me->super.prio);
+            QACTIVE_POST(&me->super, SEND_SIG, me->super.prio);
             status_ = Q_HANDLED();
             break;
         }
-        /* ${AOs::Sensor::SM::Active::TempSensing} */
+        /* ${AOs::Sensor::SM::Active::Sensing} */
         case Q_EXIT_SIG: {
             #ifdef TRACE
                 Serial.println(F("Exit TempSensing"));
@@ -231,6 +184,11 @@ static QState Sensor_TempSensing(Sensor * const me) {
             status_ = Q_HANDLED();
             break;
         }
+        /* ${AOs::Sensor::SM::Active::Sensing::SEND} */
+        case SEND_SIG: {
+            status_ = Q_TRAN(&Sensor_Sending);
+            break;
+        }
         default: {
             status_ = Q_SUPER(&Sensor_Active);
             break;
@@ -238,38 +196,40 @@ static QState Sensor_TempSensing(Sensor * const me) {
     }
     return status_;
 }
-/*${AOs::Sensor::SM::Active::Emitting} .....................................*/
-static QState Sensor_Emitting(Sensor * const me) {
+/*${AOs::Sensor::SM::Active::Sending} ......................................*/
+static QState Sensor_Sending(Sensor * const me) {
     QState status_;
     switch (Q_SIG(me)) {
-        /* ${AOs::Sensor::SM::Active::Emitting} */
+        /* ${AOs::Sensor::SM::Active::Sending} */
         case Q_ENTRY_SIG: {
             #ifdef TRACE
-                Serial.println(F("Enter Emitting"));
+                Serial.println(F("Enter Sending"));
             #endif
 
-            man.transmitArray(me->sensor_data[0][0], me->sensor_data[0]);
-            delay(10);
 
-            man.transmitArray(me->sensor_data[0][0], me->sensor_data[0]);
-            delay(10);
+            digitalWrite(LED_PIN, HIGH);
 
-            man.transmitArray(me->sensor_data[0][0], me->sensor_data[0]);
-            delay(10);
+            oregon.Emit(OREGON_TYPE, Oregon::Channel::ONE, OREGON_ID, me->m_Message);
+
+            digitalWrite(LED_PIN, LOW);
+
+            digitalWrite(PERIPH_VCC_PIN, LOW);
 
             QACTIVE_POST(&me->super, EMISSION_FINISHED_SIG, me->super.prio);
             status_ = Q_HANDLED();
             break;
         }
-        /* ${AOs::Sensor::SM::Active::Emitting} */
+        /* ${AOs::Sensor::SM::Active::Sending} */
         case Q_EXIT_SIG: {
-            // not needed in transmit mode
-            // QACTIVE_POST(AO_Timer, QP_CLOCK, AO_Timer.prio);
-
             #ifdef TRACE
-                Serial.println(F("Exit Emitting"));
+                Serial.println(F("Exit Sending"));
             #endif
             status_ = Q_HANDLED();
+            break;
+        }
+        /* ${AOs::Sensor::SM::Active::Sending::EMISSION_FINISHED} */
+        case EMISSION_FINISHED_SIG: {
+            status_ = Q_TRAN(&Sensor_Idle);
             break;
         }
         default: {
@@ -279,37 +239,33 @@ static QState Sensor_Emitting(Sensor * const me) {
     }
     return status_;
 }
-/*${AOs::Sensor::SM::Sleeping} .............................................*/
-static QState Sensor_Sleeping(Sensor * const me) {
+/*${AOs::Sensor::SM::Active::Idle} .........................................*/
+static QState Sensor_Idle(Sensor * const me) {
     QState status_;
     switch (Q_SIG(me)) {
-        /* ${AOs::Sensor::SM::Sleeping} */
+        /* ${AOs::Sensor::SM::Active::Idle} */
         case Q_ENTRY_SIG: {
             #ifdef TRACE
-                Serial.println("Enter Sleeping");
+              Serial.println("Enter Idle");
             #endif
-            digitalWrite(PERIPH_VCC_PIN, 0);
-            QActive_armX(&me->super, 0U, BSP_TICKS_PER_SEC*5U, 0U);
             status_ = Q_HANDLED();
             break;
         }
-        /* ${AOs::Sensor::SM::Sleeping} */
+        /* ${AOs::Sensor::SM::Active::Idle} */
         case Q_EXIT_SIG: {
             #ifdef TRACE
-                Serial.println("Exit Sleeping");
+              Serial.println("Exit Idle");
             #endif
-            QActive_disarmX(&me->super, 0U);
-
             status_ = Q_HANDLED();
             break;
         }
-        /* ${AOs::Sensor::SM::Sleeping::Q_TIMEOUT} */
-        case Q_TIMEOUT_SIG: {
-            status_ = Q_TRAN(&Sensor_Active);
+        /* ${AOs::Sensor::SM::Active::Idle::SENSE} */
+        case SENSE_SIG: {
+            status_ = Q_TRAN(&Sensor_Sensing);
             break;
         }
         default: {
-            status_ = Q_SUPER(&QHsm_top);
+            status_ = Q_SUPER(&Sensor_Active);
             break;
         }
     }
@@ -330,11 +286,7 @@ QActiveCB const Q_ROM QF_active[] = {
 void PrintSensorData()
 {
     Serial.println(F("Temp sensor data: "));
-    Serial.print("Size: ") ; Serial.println(AO_Sensor.sensor_data[TEMP_SENSOR_ID][MESSAGE_SIZE_POS]);
-    Serial.print("Dev. Id: ") ; Serial.println(AO_Sensor.sensor_data[TEMP_SENSOR_ID][DEV_ID_POS]);
-    Serial.print("Sensor Id: ") ; Serial.println(AO_Sensor.sensor_data[TEMP_SENSOR_ID][SENSOR_ID_POS]);
-    Serial.print("First byte: ") ; Serial.println(AO_Sensor.sensor_data[TEMP_SENSOR_ID][SENSOR_BYTE_1_POS]);
-    Serial.print("Second byte: ") ; Serial.println(AO_Sensor.sensor_data[TEMP_SENSOR_ID][SENSOR_BYTE_2_POS]);
+    Serial.print("Temperature: ") ; Serial.println(AO_Sensor.m_Message.temperature);
 
 }
 
@@ -343,30 +295,46 @@ void PrintInfo()
     Serial.print(F("QP-nano: "));
     Serial.println(F(QP_VERSION_STR));
 
-    Serial.print("CPU Freq: ");
+    Serial.print(F("CPU Freq: "));
     Serial.print(F_CPU / 1000000);
     Serial.println("Mhz");
 
-    Serial.print("State machine ticks/s: ");
+    Serial.print(F("Watchdog overflow count before emission: "));
+    Serial.println(SLEEP_DELAY_SECOND);
+
+    Serial.print(F("State machine ticks/s: "));
     Serial.println(BSP_TICKS_PER_SEC);
 
-    Serial.print("433Mhz baud rate: ");
-    Serial.print("MAN_4800");
-    Serial.println("bps");
+}
+
+void setupWdt()
+{
+    cli();
+
+    wdt_reset();
+
+    MCUSR &= ~(1<<WDRF);
+
+    // Start timed sequence
+    WDTCSR |= (1<<WDCE) | (1<<WDE);
+
+    WDTCSR = (1 << WDP3)|(1 << WDP0)| ( 1 << WDIE); // 8 sec, interrupts
+
+    sei();
 }
 
 //............................................................................
 void setup() {
 
-    analogReference(INTERNAL);
+    setupWdt();
+
+    pinMode(13, OUTPUT);
+    digitalWrite(13, LOW);
 
     pinMode(LED_PIN, OUTPUT);        // set the LED-PIN pin to output
-    digitalWrite(LED_PIN, 0);
-
+    digitalWrite(LED_PIN, LOW);
     pinMode(PERIPH_VCC_PIN, OUTPUT);
     digitalWrite(PERIPH_VCC_PIN, 0);
-
-    man.setupTransmit(TX_PIN, MAN_4800);
 
     Serial.begin(57600);   // set the highest stanard baud rate of 115200 bps (mini pro uses x2)
 
@@ -381,6 +349,20 @@ void setup() {
 //
 void loop() {
     QF_run(); // run the QP-nano application
+}
+
+ISR(WDT_vect)
+{
+    WDTCSR |= (1 << WDIE);
+    if(_sleepDelayCounter == 0)
+    {
+        _sleepDelayCounter = SLEEP_DELAY_SECOND;
+        QACTIVE_POST_ISR((QMActive *)&AO_Sensor, SENSE_SIG, 0U);
+    }
+    else
+    {
+        --_sleepDelayCounter;
+    }
 }
 
 ISR(TIMER2_COMPA_vect) {
@@ -429,14 +411,32 @@ void QF_onStartup(void) {
 void QV_onIdle(void) {   // called with interrupts DISABLED
 
 #ifdef TRACE
-    //Serial.println(F("QV_onIdle"));
+    Serial.println(F("QV_onIdle"));
 #endif
 
+    Serial.flush();
     // Put the CPU and peripherals to the low-power mode. You might
     // need to customize the clock management for your application,
     // see the datasheet for your particular AVR MCU.
-    SMCR = (0 << SM0) | (1 << SE); // idle mode, adjust to your project
-    QV_CPU_SLEEP();  // atomically go to sleep and enable interrupts
+    set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+
+    // Shutdown all peripherals but watchdog.
+    // It will shut down statemachine heartbeat until
+    // watchdog it
+    PRR = 0b11101111;
+
+    sleep_enable();
+
+    //QV_CPU_SLEEP();  // atomically go to sleep and enable interrupts
+    sei();
+    sleep_mode();
+    sleep_disable();
+
+    // let TWI, SPI and TIMER0 off and wakeup others
+    PRR = 0b10010100;
+
+    // also shutdown usart
+    // PRR = 0b10010110;
 }
 
 //............................................................................
