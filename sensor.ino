@@ -46,7 +46,7 @@ const uint8_t TEMP_SAMPLE_COUNT = 16; // 2^4, allow division with bitshift
 
 // see https://playground.arduino.cc/Main/LM35HigherResolution
 #define AREF 1.087
-#define TEMPERATURE_RATIO   10 / (AREF / 1024.0 * 1000)
+#define TEMPERATURE_RATIO   (AREF / 1024.0 * 100.0)
 
 // constants for 433Mhz emitter
 #define TX_PIN  5 //pin where your transmitter is connected
@@ -164,7 +164,7 @@ static QState Sensor_Sensing(Sensor * const me) {
             analogVal = (accumulator >> 4);
 
             // the value is adjusted with Aref value for each sensor module.
-            analogVal = analogVal / TEMPERATURE_RATIO;
+            analogVal = analogVal * TEMPERATURE_RATIO;
 
             me->m_Message.temperature = analogVal;
 
