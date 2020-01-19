@@ -1,0 +1,897 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<model version="4.6.0" links="0">
+ <framework name="qpn"/>
+ <package name="AOs" stereotype="0x02">
+  <class name="Sensor" superclass="qpn::QActive">
+   <attribute name="m_Message" type="Oregon::Message" visibility="0x00" properties="0x00"/>
+   <statechart properties="0x01">
+    <initial target="../1">
+     <initial_glyph conn="46,7,4,0,7">
+      <action box="0,-2,10,2"/>
+     </initial_glyph>
+    </initial>
+    <state name="Active">
+     <entry>#ifdef TRACE
+  Serial.println(&quot;Enter Active&quot;);
+#endif
+</entry>
+     <exit>#ifdef TRACE
+    Serial.println(&quot;Exit Active&quot;);
+#endif</exit>
+     <initial target="../1">
+      <initial_glyph conn="37,18,5,0,11,4">
+       <action box="0,-2,10,2"/>
+      </initial_glyph>
+     </initial>
+     <state name="Sensing">
+      <entry brief="Sense and save">#ifdef TRACE
+  Serial.println(F(&quot;Enter Sensing&quot;));
+#endif
+
+digitalWrite(PERIPH_VCC_PIN, HIGH);
+analogReference(INTERNAL);
+
+// http://www.ti.com/lit/ds/symlink/lm35.pdf p.12 
+// (startup response)
+delay(30);
+
+uint16_t accumulator = 0;
+double analogVal = 0;
+
+// first read is usually false
+// make a blank read
+analogRead(ANALOG_TEMP_SENSOR_PIN);
+
+// message length is fixed
+for (uint8_t j = 0 ; j &lt; TEMP_SAMPLE_COUNT ; ++j)
+{
+  accumulator += analogRead(ANALOG_TEMP_SENSOR_PIN);
+}
+
+analogVal = (accumulator &gt;&gt; 4);
+
+// the value is adjusted with Aref value for each sensor module.
+analogVal = analogVal * TEMPERATURE_RATIO;
+
+me-&gt;m_Message.temperature = analogVal;
+
+long actualVcc = readVcc();
+
+#ifdef TRACE
+Serial.print(&quot;Current battery level:&quot;);
+Serial.print(actualVcc);
+Serial.println(&quot;mV&quot;);
+#endif
+
+if(actualVcc &lt; LOW_BATTERY)
+{
+    Serial.println(&quot;Low battery state&quot;);
+    me-&gt;m_Message.battery = 0;
+}
+Serial.print(me-&gt;m_Message.temperature);
+Serial.println(F(&quot; °C&quot;));
+
+QACTIVE_POST(&amp;me-&gt;super, SEND_SIG, me-&gt;super.prio);</entry>
+      <exit>#ifdef TRACE
+    Serial.println(F(&quot;Exit TempSensing&quot;));
+#endif
+</exit>
+      <tran trig="SEND" target="../../2">
+       <tran_glyph conn="51,32,2,0,7">
+        <action box="1,2,12,2"/>
+       </tran_glyph>
+      </tran>
+      <state_glyph node="39,22,27,10">
+       <entry box="1,2,23,2"/>
+       <exit box="1,4,6,2"/>
+      </state_glyph>
+     </state>
+     <state name="Sending">
+      <entry brief="Transmit all sensors information">#ifdef TRACE
+    Serial.println(F(&quot;Enter Sending&quot;));
+#endif
+
+
+digitalWrite(LED_PIN, HIGH);
+
+oregon.Emit(OREGON_TYPE, Oregon::Channel::ONE, OREGON_ID, me-&gt;m_Message);
+
+digitalWrite(LED_PIN, LOW);
+
+digitalWrite(PERIPH_VCC_PIN, LOW);
+
+QACTIVE_POST(&amp;me-&gt;super, EMISSION_FINISHED_SIG, me-&gt;super.prio);</entry>
+      <exit>#ifdef TRACE
+    Serial.println(F(&quot;Exit Sending&quot;));
+#endif</exit>
+      <tran trig="EMISSION_FINISHED" target="../../3">
+       <tran_glyph conn="35,45,3,2,-14,-14">
+        <action box="-18,1,16,2"/>
+       </tran_glyph>
+      </tran>
+      <state_glyph node="35,39,30,11">
+       <entry box="1,2,26,3"/>
+       <exit box="1,5,6,2"/>
+      </state_glyph>
+     </state>
+     <state name="Idle">
+      <entry>#ifdef TRACE
+  Serial.println(&quot;Enter Idle&quot;);
+#endif</entry>
+      <exit>#ifdef TRACE
+  Serial.println(&quot;Exit Idle&quot;);
+#endif</exit>
+      <tran trig="SENSE" target="../../1">
+       <tran_glyph conn="29,29,1,3,10">
+        <action box="1,-3,10,2"/>
+       </tran_glyph>
+      </tran>
+      <state_glyph node="18,25,11,6">
+       <entry box="1,2,6,2"/>
+       <exit box="1,4,6,2"/>
+      </state_glyph>
+     </state>
+     <state_glyph node="14,14,63,40">
+      <entry box="1,2,22,2"/>
+      <exit box="1,4,6,3"/>
+     </state_glyph>
+    </state>
+    <state_diagram size="147,82"/>
+   </statechart>
+  </class>
+ </package>
+ <directory name=".">
+  <file name="sensor.ino" codec="UTF-8">
+   <text>#include &quot;qpn.h&quot;        // QP-nano framework
+#include &quot;Arduino.h&quot;    // Arduino API
+#include &quot;oregon.h&quot; // 433Mhz transmission library
+
+#include &lt;avr/sleep.h&gt;
+#include &lt;avr/wdt.h&gt;
+
+Q_DEFINE_THIS_MODULE(&quot;sensor&quot;)
+
+// define to println() many information
+//#define TRACE 1
+
+enum {
+    BSP_TICKS_PER_SEC = 100,  // number of system clock ticks in one second
+    LED_PIN           = 3,  // the pin number of the on-board LED
+    PERIPH_VCC_PIN    = 10,  // the pin number which activates the vcc rail for peripherals (emitter, sensors)
+    SENSOR_COUNT      = 1,   // How many sensors do we have, ie how many data row to send
+};
+
+
+// ------------
+
+// some constant for temperature sensor
+#define ANALOG_TEMP_SENSOR_PIN A0
+
+// 2^4, allow division with bitshift
+// ratio to apply to the raw analog measurement from ADC on LM38
+const uint8_t TEMP_SAMPLE_COUNT = 16;
+
+// below this voltage (mV), we
+// consider beiing in low battery level.
+const long LOW_BATTERY = 1100*3;
+
+// see https://playground.arduino.cc/Main/LM35HigherResolution
+#define AREF 1.103800587
+#define TEMPERATURE_RATIO   (AREF / 1024.0 * 100.0)
+
+// constants for 433Mhz emitter
+#define TX_PIN  5 //pin where your transmitter is connected
+
+uint8_t OREGON_TYPE[] = {0x1A,0x2D}; // inside temp
+#define COMMAND_REPEAT_COUNT 5
+#define OREGON_ID 0xBC
+Oregon oregon(LED_PIN, TX_PIN, COMMAND_REPEAT_COUNT);
+Oregon::Message message;
+
+// emit each 5 minutes (how many 8sec watchdog wakeups)
+const uint8_t SLEEP_DELAY_SECOND = (uint8_t)((5*60) / 8);
+volatile uint8_t _sleepDelayCounter = SLEEP_DELAY_SECOND;
+
+
+
+//============================================================================
+enum SensorSignals {
+    SEND_SIG = Q_USER_SIG,
+    EMISSION_FINISHED_SIG,
+    SENSE_SIG,
+
+};
+
+$declare(AOs::Sensor)
+$define(AOs::Sensor)
+
+Sensor AO_Sensor;
+
+// QF_active[] array defines all active object control blocks ----------------
+static QEvt l_sensorQSto[10]; // Event queue storage for Sensor
+
+QActiveCB const Q_ROM QF_active[] = {
+  { (QActive *)0,           (QEvt *)0,        0U                  },
+  { (QActive *)&amp;AO_Sensor,  l_sensorQSto,     Q_DIM(l_sensorQSto) }
+};
+
+void PrintSensorData()
+{
+    Serial.println(F(&quot;Temp sensor data: &quot;));
+    Serial.print(&quot;Temperature: &quot;) ; Serial.println(AO_Sensor.m_Message.temperature);
+
+}
+
+void PrintInfo()
+{
+    Serial.print(F(&quot;QP-nano: &quot;));
+    Serial.println(F(QP_VERSION_STR));
+
+    Serial.print(F(&quot;CPU Freq: &quot;));
+    Serial.print(F_CPU / 1000000);
+    Serial.println(&quot;Mhz&quot;);
+
+    Serial.print(F(&quot;Watchdog overflow count before emission: &quot;));
+    Serial.println(SLEEP_DELAY_SECOND);
+
+    Serial.print(F(&quot;State machine ticks/s: &quot;));
+    Serial.println(BSP_TICKS_PER_SEC);
+
+}
+
+long readVcc() {
+  // Read 1.1V reference against AVcc
+  // set the reference to Vcc and the measurement to the internal 1.1V reference
+  #if defined(__AVR_ATmega32U4__) || defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
+    ADMUX = _BV(REFS0) | _BV(MUX4) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+  #elif defined (__AVR_ATtiny24__) || defined(__AVR_ATtiny44__) || defined(__AVR_ATtiny84__)
+    ADMUX = _BV(MUX5) | _BV(MUX0);
+  #elif defined (__AVR_ATtiny25__) || defined(__AVR_ATtiny45__) || defined(__AVR_ATtiny85__)
+    ADMUX = _BV(MUX3) | _BV(MUX2);
+  #else
+    ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+  #endif
+
+  delay(2); // Wait for Vref to settle
+  ADCSRA |= _BV(ADSC); // Start conversion
+  while (bit_is_set(ADCSRA,ADSC)); // measuring
+
+  uint8_t low  = ADCL; // must read ADCL first - it then locks ADCH  
+  uint8_t high = ADCH; // unlocks both
+
+  long result = (high&lt;&lt;8) | low;
+
+  // scale_constant = internal1.1Ref * 1023 * 1000
+  // internal1.1Ref = 1.1 * Vcc1 (per voltmeter) / Vcc2 (per readVcc() function)
+
+  result = 1129188L / result; // Calculate Vcc (in mV); 1125300 = 1.1*1023*1000
+  return result; // Vcc in millivolts
+}
+
+void setupWdt()
+{
+    cli();
+    wdt_reset();
+    MCUSR &amp;= ~(1&lt;&lt;WDRF);
+    WDTCSR |= (1&lt;&lt;WDCE) | (1&lt;&lt;WDE);
+    WDTCSR = (1 &lt;&lt; WDP3)|(1 &lt;&lt; WDP0)| ( 1 &lt;&lt; WDIE); // 8 sec, interrupts
+    sei();
+}
+
+//............................................................................
+void setup() {
+    
+    setupWdt();
+
+    pinMode(13, OUTPUT);
+    digitalWrite(13, LOW);
+
+    pinMode(LED_PIN, OUTPUT);        // set the LED-PIN pin to output
+    digitalWrite(LED_PIN, LOW);
+    pinMode(PERIPH_VCC_PIN, OUTPUT);
+    digitalWrite(PERIPH_VCC_PIN, 0);
+
+    Serial.begin(57600);   // set the highest stanard baud rate of 115200 bps (mini pro uses x2)
+
+    PrintInfo();
+
+    // initialize the QF-nano framework
+    QF_init(Q_DIM(QF_active));
+    QActive_ctor(&amp;AO_Sensor.super, Q_STATE_CAST(&amp;Sensor_initial));
+
+}
+
+//
+void loop() {
+    QF_run(); // run the QP-nano application
+}
+
+ISR(WDT_vect)
+{
+    WDTCSR |= (1 &lt;&lt; WDIE);
+    if(_sleepDelayCounter == 0)
+    {
+        _sleepDelayCounter = SLEEP_DELAY_SECOND;
+        QACTIVE_POST_ISR((QMActive *)&amp;AO_Sensor, SENSE_SIG, 0U);
+    }
+    else
+    {
+        --_sleepDelayCounter;
+    }
+}
+
+ISR(TIMER2_COMPA_vect) {
+    if (Serial.available() &gt; 0) {
+        switch (Serial.read()) { // read the incoming byte
+            case 'p':
+            case 'P':
+            {
+               PrintInfo(); 
+               break;
+            }
+            case 'd':
+            case 'D':
+            {
+               PrintSensorData();
+               break;
+            }
+       }
+    }
+
+    QF_tickXISR(0);
+
+}
+
+//============================================================================
+
+// QF callbacks...
+void QF_onStartup(void) {
+
+#ifdef TRACE
+    Serial.println(F(&quot;QF_onStartup&quot;));
+#endif
+
+    // set Timer2 in CTC mode, 1/1024 prescaler, start the timer ticking...
+    TCCR2A = (1U &lt;&lt; WGM21) | (0U &lt;&lt; WGM20);
+    TCCR2B = (1U &lt;&lt; CS22 ) | (1U &lt;&lt; CS21) | (1U &lt;&lt; CS20); // 1/2^10
+    ASSR  &amp;= ~(1U &lt;&lt; AS2);
+    TIMSK2 = (1U &lt;&lt; OCIE2A); // enable TIMER2 compare Interrupt
+    TCNT2  = 0U;
+
+    // set the output-compare register based on the desired tick frequency
+    OCR2A  = (F_CPU / BSP_TICKS_PER_SEC / 1024U) - 1U;
+}
+
+//............................................................................
+void QV_onIdle(void) {   // called with interrupts DISABLED
+
+#ifdef TRACE
+    Serial.println(F(&quot;QV_onIdle&quot;));
+#endif
+
+    Serial.flush();
+    // Put the CPU and peripherals to the low-power mode. You might
+    // need to customize the clock management for your application,
+    // see the datasheet for your particular AVR MCU.
+    set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+
+    // Shutdown all peripherals but watchdog.
+    // It will shut down statemachine heartbeat until
+    // watchdog it
+    PRR = 0b11101111;
+
+    sleep_enable();
+
+    //QV_CPU_SLEEP();  // atomically go to sleep and enable interrupts
+    sei();
+    sleep_mode();
+    sleep_disable();
+
+    // let TWI, SPI and TIMER0 off and wakeup others
+    PRR = 0b10010100;
+
+    // also shutdown usart
+    // PRR = 0b10010110;
+}
+
+//............................................................................
+void Q_onAssert(char const Q_ROM * const file, int line) {
+
+#ifdef TRACE
+    // implement the error-handling policy for your application!!!
+    Serial.print(F(&quot;Assertion raised in '&quot;));
+    Serial.print(file);
+    Serial.print(F(&quot;' at line&quot;));
+    Serial.print(line);
+#endif
+    QF_INT_DISABLE(); // disable all interrupts
+    QF_RESET();  // reset the CPU
+}</text>
+  </file>
+  <file name="oregon.h">
+   <text>/*
+ * connectingStuff, Oregon Scientific v2.1 Emitter
+ * http://connectingstuff.net/blog/encodage-protocoles-oregon-scientific-sur-arduino/
+ *
+ * Copyright (C) 2013 olivier.lebrun@gmail.com
+ *
+ * Refactored to class by Aurélien Labrosse &lt;https://github.com/arcadien&gt; 
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+*/
+#ifndef OREGON_H_
+#define OREGON_H_
+
+#include &lt;stdint.h&gt;
+#include &lt;limits.h&gt;
+
+class Oregon
+{
+    public:
+
+    struct Message
+    {
+        static constexpr const float UNSET = -1000;
+        Message()
+        {
+         temperature  = UNSET;
+         humidity = UNSET;
+         battery = 1;
+        }
+        float temperature;
+        float humidity;
+        uint8_t battery; // 0 (low) or 1 (good)
+    };
+
+    /*!
+    * Convenient define for channel codes (1,2,3)
+    */
+     struct Channel
+     {
+        static const uint8_t ONE = 0x10;
+        static const uint8_t TWO= 0x20;
+        static const uint8_t THREE= 0x30;
+    };
+
+    Oregon(uint8_t ledPin = 13, uint8_t txPin = 7,  uint8_t repeatCount = 2);
+
+
+    void Emit(uint8_t type[], uint8_t channel, uint8_t id, const Message &amp;message);
+
+    private:
+    const uint8_t _ledPin;
+    const uint8_t _txPin;
+    const uint8_t _repeatCount;
+
+    static uint8_t PREAMBLE[];
+    static uint8_t POSTAMBLE[];
+
+    static const uint16_t TIME = 512;
+    static const uint16_t TWOTIME = TIME*2;
+
+    // Buffer for Oregon message
+    uint8_t _oregonMessageBuffer[9];
+
+    /**
+ * \brief    Send logical &quot;0&quot; over RF
+ * \details  azero bit be represented by an off-to-on transition
+ * \         of the RF signal at the middle of a clock period.
+ * \         Remember, the Oregon v2.1 protocol add an inverted bit first 
+ */
+inline void sendZero(void);
+
+/**
+ * \brief    Send logical &quot;1&quot; over RF
+ * \details  a one bit be represented by an on-to-off transition
+ * \         of the RF signal at the middle of a clock period.
+ * \         Remember, the Oregon v2.1 protocol add an inverted bit first 
+ */
+inline void sendOne(void);
+
+/**
+* Send a bits quarter (4 bits = MSB from 8 bits value) over RF
+*
+* @param data Source data to process and sent
+*/
+ 
+/**
+ * \brief    Send a bits quarter (4 bits = MSB from 8 bits value) over RF
+ * \param    data   Data to send
+ */
+inline void sendQuarterMSB(const uint8_t data);
+
+ 
+/**
+ * \brief    Send a bits quarter (4 bits = LSB from 8 bits value) over RF
+ * \param    data   Data to send
+ */
+inline void sendQuarterLSB(const uint8_t data);
+
+/**
+ * \brief    Send a buffer over RF
+ * \param    data   Data to send
+ * \param    size   size of data to send
+ */
+inline void sendData(uint8_t *data, uint8_t size);
+
+/**
+ * \brief    Send an Oregon message
+ * \param    data   The Oregon message
+ */
+inline void sendOregon(uint8_t *data, uint8_t size);
+
+/**
+ * \brief    Send preamble
+ * \details  The preamble consists of 16 &quot;1&quot; bits
+ */
+inline void sendPreamble(void);
+
+ 
+/**
+ * \brief    Send postamble
+ * \details  The postamble consists of 8 &quot;0&quot; bits
+ */
+inline void sendPostamble(void);
+
+/**
+ * \brief    Send sync nibble
+ * \details  The sync is 0xA. It is not use in this version since the sync nibble
+ * \         is include in the Oregon message to send.
+ */
+inline void sendSync(void);
+
+/**
+ * \brief    Set the sensor type
+ * \param    data       Oregon message
+ * \param    type       Sensor type
+ */
+inline void setType(uint8_t *data, uint8_t* type);
+
+/**
+ * \brief    Set the sensor channel
+ * \param    data       Oregon message
+ * \param    channel    Sensor channel (0x10, 0x20, 0x30)
+ */
+inline void setChannel(uint8_t *data, uint8_t channel);
+
+
+/**
+ * \brief    Set the sensor ID
+ * \param    data       Oregon message
+ * \param    ID         Sensor unique ID
+ */
+inline void setId(uint8_t *data, uint8_t ID) ;
+
+/**
+ * \brief    Set the sensor battery level
+ * \param    data       Oregon message
+ * \param    level      Battery level (0 = low, 1 = high)
+ */
+inline void setBatteryLevel(uint8_t *data, uint8_t level);
+
+/**
+ * \brief    Set the sensor temperature
+ * \param    data       Oregon message
+ * \param    temp       the temperature
+ */
+inline void setTemperature(uint8_t *data, float temp);
+
+/**
+ * \brief    Set the sensor humidity
+ * \param    data       Oregon message
+ * \param    hum        the humidity
+ */
+inline void setHumidity(uint8_t* data, uint8_t hum);
+
+/**
+ * \brief    Sum data for checksum
+ * \param    count      number of bit to sum
+ * \param    data       Oregon message
+ */
+inline int Sum(uint8_t count, const uint8_t* data);
+
+/**
+ * \brief    Calculate checksum
+ * \param    data       Oregon message
+ */
+inline void calculateAndSetChecksum(uint8_t* data);
+
+};
+
+#endif /* OREGON_H_ */</text>
+  </file>
+  <file name="oregon.cpp">
+   <text>#include &quot;oregon.h&quot;
+#include &quot;Arduino.h&quot;
+
+ uint8_t Oregon::PREAMBLE[]={0xFF,0xFF};
+ uint8_t Oregon::POSTAMBLE[]={0x00};
+    
+Oregon::Oregon(uint8_t ledPin, uint8_t txPin, uint8_t repeatCount) :  _ledPin(ledPin),  _txPin(txPin), _repeatCount(repeatCount)
+{    
+    for(uint8_t counter = 0; counter &lt; 9; ++counter)
+    {
+            _oregonMessageBuffer[counter] = 0;
+    }
+
+}
+
+void Oregon::Emit(uint8_t type[], uint8_t channel, uint8_t id, const Message &amp;message)
+{
+    
+    setId(_oregonMessageBuffer, id);
+
+     setBatteryLevel(_oregonMessageBuffer, message.battery);
+     
+     if(message.temperature != Message::UNSET)
+     {
+        setTemperature(_oregonMessageBuffer, message.temperature);
+     }
+     
+     if(message.humidity != Message::UNSET)
+     {
+        setHumidity(_oregonMessageBuffer, message.humidity);
+     }
+     
+     setType(_oregonMessageBuffer, type);
+     setChannel(_oregonMessageBuffer, channel);
+     // Calculate the checksum
+     calculateAndSetChecksum(_oregonMessageBuffer);
+    
+    for(uint8_t emissionCounter = _repeatCount; emissionCounter &gt; 0; --emissionCounter)
+    {
+         sendOregon(_oregonMessageBuffer, sizeof(_oregonMessageBuffer));
+           
+         // pause before new transmission
+         digitalWrite(_txPin, LOW);
+         delayMicroseconds(TWOTIME*8);
+    }    
+}
+
+
+/**
+ * \brief    Send logical &quot;0&quot; over RF
+ * \details  a zero bit be represented by an off-to-on transition
+ * \         of the RF signal at the middle of a clock period.
+ * \         Remember, the Oregon v2.1 protocol add an inverted bit first 
+ */
+inline void Oregon::sendZero(void) 
+{
+  digitalWrite(_txPin, HIGH);
+  delayMicroseconds(TIME);
+  digitalWrite(_txPin, LOW);
+  delayMicroseconds(TWOTIME);
+  digitalWrite(_txPin, HIGH);
+  delayMicroseconds(TIME);
+}
+ 
+/**
+ * \brief    Send logical &quot;1&quot; over RF
+ * \details  a one bit be represented by an on-to-off transition
+ * \         of the RF signal at the middle of a clock period.
+ * \         Remember, the Oregon v2.1 protocol add an inverted bit first 
+ */
+inline void Oregon::sendOne(void) 
+{
+  digitalWrite(_txPin, LOW);
+   delayMicroseconds(TIME);
+  digitalWrite(_txPin, HIGH);
+   delayMicroseconds(TWOTIME);
+  digitalWrite(_txPin, LOW);
+   delayMicroseconds(TIME);
+}
+ 
+/**
+* Send a bits quarter (4 bits = MSB from 8 bits value) over RF
+*
+* @param data Source data to process and sent
+*/
+ 
+/**
+ * \brief    Send a bits quarter (4 bits = MSB from 8 bits value) over RF
+ * \param    data   Data to send
+ */
+inline void Oregon::sendQuarterMSB(const uint8_t data) 
+{
+  (bitRead(data, 4)) ? sendOne() : sendZero();
+  (bitRead(data, 5)) ? sendOne() : sendZero();
+  (bitRead(data, 6)) ? sendOne() : sendZero();
+  (bitRead(data, 7)) ? sendOne() : sendZero();
+}
+ 
+/**
+ * \brief    Send a bits quarter (4 bits = LSB from 8 bits value) over RF
+ * \param    data   Data to send
+ */
+inline void Oregon::sendQuarterLSB(const uint8_t data) 
+{
+  (bitRead(data, 0)) ? sendOne() : sendZero();
+  (bitRead(data, 1)) ? sendOne() : sendZero();
+  (bitRead(data, 2)) ? sendOne() : sendZero();
+  (bitRead(data, 3)) ? sendOne() : sendZero();
+}
+ 
+/**
+ * \brief    Send a buffer over RF
+ * \param    data   Data to send
+ * \param    size   size of data to send
+ */
+void Oregon::sendData(uint8_t *data, uint8_t size)
+{
+  for(uint8_t i = 0; i &lt; size; ++i)
+  {
+    sendQuarterLSB(data[i]);
+    sendQuarterMSB(data[i]);
+  }
+}
+ 
+/**
+ * \brief    Send an Oregon message
+ * \param    data   The Oregon message
+ */
+void Oregon::sendOregon(uint8_t *data, uint8_t size)
+{
+    sendPreamble();
+    //sendSync();
+    sendData(data, size);
+    sendPostamble();
+}
+ 
+/**
+ * \brief    Send preamble
+ * \details  The preamble consists of 16 &quot;1&quot; bits
+ */
+inline void Oregon::sendPreamble(void)
+{
+  sendData(PREAMBLE, 2);
+}
+ 
+/**
+ * \brief    Send postamble
+ * \details  The postamble consists of 8 &quot;0&quot; bits
+ */
+inline void Oregon::sendPostamble(void)
+{
+  sendData(POSTAMBLE, 1);  
+}
+ 
+/**
+ * \brief    Send sync nibble
+ * \details  The sync is 0xA. It is not use in this version since the sync nibble
+ * \         is include in the Oregon message to send.
+ */
+inline void Oregon::sendSync(void)
+{
+  sendQuarterLSB(0xA);
+}
+  
+/**
+ * \brief    Set the sensor type
+ * \param    data       Oregon message
+ * \param    type       Sensor type
+ */
+inline void Oregon::setType(uint8_t *data, uint8_t* type) 
+{
+  data[0] = type[0];
+  data[1] = type[1];
+}
+ 
+/**
+ * \brief    Set the sensor channel
+ * \param    data       Oregon message
+ * \param    channel    Sensor channel (0x10, 0x20, 0x30)
+ */
+inline void Oregon::setChannel(uint8_t *data, uint8_t channel) 
+{
+    data[2] = channel;
+}
+ 
+/**
+ * \brief    Set the sensor ID
+ * \param    data       Oregon message
+ * \param    ID         Sensor unique ID
+ */
+inline void Oregon::setId(uint8_t *data, uint8_t ID) 
+{
+  data[3] = ID;
+}
+ 
+/**
+ * \brief    Set the sensor battery level
+ * \param    data       Oregon message
+ * \param    level      Battery level (0 = low, 1 = high)
+ */
+void Oregon::setBatteryLevel(uint8_t *data, uint8_t level)
+{
+  if(!level) data[4] = 0x0C;
+  else data[4] = 0x00;
+}
+ 
+/**
+ * \brief    Set the sensor temperature
+ * \param    data       Oregon message
+ * \param    temp       the temperature
+ */
+void Oregon::setTemperature(uint8_t *data, float temp) 
+{
+  // Set temperature sign
+  if(temp &lt; 0)
+  {
+    data[6] = 0x08;
+    temp *= -1;  
+  }
+  else
+  {
+    data[6] = 0x00;
+  }
+
+  int tempInt = (int)temp;
+  int td = (int)(tempInt / 10);
+  int tf = (int)round((float)((float)tempInt/10 - (float)td) * 10);
+  int tempFloat =  (int)round((float)(temp - (float)tempInt) * 10);
+  uint8_t flt_o = tempFloat &lt;&lt; 4;
+  uint8_t dec_o = (td &lt;&lt; 4);
+  dec_o |=  tf;
+
+  //// Set temperature decimal part
+  data[5] = dec_o;
+ 
+  //// Set temperature float part
+  data[4] |= flt_o;
+}
+ 
+/**
+ * \brief    Set the sensor humidity
+ * \param    data       Oregon message
+ * \param    hum        the humidity
+ */
+void Oregon::setHumidity(uint8_t* data, uint8_t hum)
+{
+    data[7] = (hum/10);
+    data[6] |= (hum - data[7]*10) &lt;&lt; 4;
+}
+ 
+/**
+ * \brief    Sum data for checksum
+ * \param    count      number of bit to sum
+ * \param    data       Oregon message
+ */
+int Oregon::Sum(uint8_t count, const uint8_t* data)
+{
+  int s = 0;
+ 
+  for(uint8_t i = 0; i&lt;count;i++)
+  {
+    s += (data[i]&amp;0xF0) &gt;&gt; 4;
+    s += (data[i]&amp;0xF);
+  }
+ 
+  if(int(count) != count)
+    s += (data[count]&amp;0xF0) &gt;&gt; 4;
+ 
+  return s;
+}
+ 
+/**
+ * \brief    Calculate checksum
+ * \param    data       Oregon message
+ */
+void Oregon::calculateAndSetChecksum(uint8_t* data)
+{
+    data[8] = ((Sum(8, data) - 0xa) &amp; 0xFF);
+}</text>
+  </file>
+ </directory>
+</model>
