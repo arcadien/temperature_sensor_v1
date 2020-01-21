@@ -192,7 +192,7 @@ Oregon::Message message;
 const uint8_t SLEEP_DELAY_SECOND = (uint8_t)((5*60) / 8);
 volatile uint8_t _sleepDelayCounter = SLEEP_DELAY_SECOND;
 
-
+long readVcc();
 
 //============================================================================
 enum SensorSignals {
@@ -240,6 +240,8 @@ void PrintInfo()
 }
 
 long readVcc() {
+
+  byte ADMUX_backup = ADMUX;
   // Read 1.1V reference against AVcc
   // set the reference to Vcc and the measurement to the internal 1.1V reference
   #if defined(__AVR_ATmega32U4__) || defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
@@ -265,6 +267,10 @@ long readVcc() {
   // internal1.1Ref = 1.1 * Vcc1 (per voltmeter) / Vcc2 (per readVcc() function)
 
   result = 1129188L / result; // Calculate Vcc (in mV); 1125300 = 1.1*1023*1000
+
+  ADMUX= ADMUX_backup;
+  delay(2);
+
   return result; // Vcc in millivolts
 }
 
