@@ -3,7 +3,6 @@
  <framework name="qpn"/>
  <package name="AOs" stereotype="0x02">
   <class name="Sensor" superclass="qpn::QActive">
-   <attribute name="m_Message" type="Oregon::Message" visibility="0x00" properties="0x00"/>
    <statechart properties="0x01">
     <initial target="../1">
      <initial_glyph conn="46,7,4,0,7">
@@ -28,48 +27,8 @@
   Serial.println(F(&quot;Enter Sensing&quot;));
 #endif
 
-digitalWrite(PERIPH_VCC_PIN, HIGH);
-analogReference(INTERNAL);
-
-// http://www.ti.com/lit/ds/symlink/lm35.pdf p.12 
-// (startup response)
-delay(30);
-
-uint16_t accumulator = 0;
-double analogVal = 0;
-
-// first read is usually false
-// make a blank read
-analogRead(ANALOG_TEMP_SENSOR_PIN);
-
-// message length is fixed
-for (uint8_t j = 0 ; j &lt; TEMP_SAMPLE_COUNT ; ++j)
-{
-  accumulator += analogRead(ANALOG_TEMP_SENSOR_PIN);
-}
-
-analogVal = (accumulator &gt;&gt; 4);
-
-// the value is adjusted with Aref value for each sensor module.
-analogVal = analogVal * TEMPERATURE_RATIO;
-
-me-&gt;m_Message.temperature = analogVal;
-
-long actualVcc = readVcc();
-
-#ifdef TRACE
-Serial.print(&quot;Current battery level:&quot;);
-Serial.print(actualVcc);
-Serial.println(&quot;mV&quot;);
-#endif
-
-if(actualVcc &lt; LOW_BATTERY)
-{
-    Serial.println(&quot;Low battery state&quot;);
-    me-&gt;m_Message.battery = 0;
-}
-Serial.print(me-&gt;m_Message.temperature);
-Serial.println(F(&quot; °C&quot;));
+tinySensor.ReadTemperature();
+tinySensor.ReadVcc();
 
 QACTIVE_POST(&amp;me-&gt;super, SEND_SIG, me-&gt;super.prio);</entry>
       <exit>#ifdef TRACE
@@ -91,18 +50,13 @@ QACTIVE_POST(&amp;me-&gt;super, SEND_SIG, me-&gt;super.prio);</entry>
     Serial.println(F(&quot;Enter Sending&quot;));
 #endif
 
-
-digitalWrite(LED_PIN, HIGH);
-
-oregon.Emit(OREGON_TYPE, Oregon::Channel::ONE, OREGON_ID, me-&gt;m_Message);
-
-digitalWrite(LED_PIN, LOW);
-
-digitalWrite(PERIPH_VCC_PIN, LOW);
+tinySensor.SendTemperature();
+tinySensor.SendBatteryLevel();
 
 QACTIVE_POST(&amp;me-&gt;super, EMISSION_FINISHED_SIG, me-&gt;super.prio);</entry>
       <exit>#ifdef TRACE
     Serial.println(F(&quot;Exit Sending&quot;));
+
 #endif</exit>
       <tran trig="EMISSION_FINISHED" target="../../3">
        <tran_glyph conn="35,45,3,2,-14,-14">
@@ -117,6 +71,8 @@ QACTIVE_POST(&amp;me-&gt;super, EMISSION_FINISHED_SIG, me-&gt;super.prio);</entr
      <state name="Idle">
       <entry>#ifdef TRACE
   Serial.println(&quot;Enter Idle&quot;);
+
+
 #endif</entry>
       <exit>#ifdef TRACE
   Serial.println(&quot;Exit Idle&quot;);
@@ -142,25 +98,27 @@ QACTIVE_POST(&amp;me-&gt;super, EMISSION_FINISHED_SIG, me-&gt;super.prio);</entr
  </package>
  <directory name=".">
   <file name="sensor.ino" codec="UTF-8">
-   <text>#include &quot;qpn.h&quot;        // QP-nano framework
-#include &quot;Arduino.h&quot;    // Arduino API
-#include &quot;oregon.h&quot; // 433Mhz transmission library
+   <text>#include &quot;qpn.h&quot;     // QP-nano framework
+#include &quot;Arduino.h&quot; // Arduino API
+#include &quot;oregon.h&quot;  // 433Mhz transmission library
 
 #include &lt;avr/sleep.h&gt;
 #include &lt;avr/wdt.h&gt;
+#include &lt;x10rf.h&gt;
 
 Q_DEFINE_THIS_MODULE(&quot;sensor&quot;)
 
 // define to println() many information
 //#define TRACE 1
 
-enum {
-    BSP_TICKS_PER_SEC = 100,  // number of system clock ticks in one second
-    LED_PIN           = 3,  // the pin number of the on-board LED
-    PERIPH_VCC_PIN    = 10,  // the pin number which activates the vcc rail for peripherals (emitter, sensors)
-    SENSOR_COUNT      = 1,   // How many sensors do we have, ie how many data row to send
+enum
+{
+    BSP_TICKS_PER_SEC = 100, // number of system clock ticks in one second
+    LED_PIN = 3,             // the pin number of the on-board LED
+    PERIPH_VCC_PIN = 10,     // the pin number which activates the vcc rail for peripherals (emitter, sensors)
+    SENSOR_COUNT = 1,        // How many sensors do we have, ie how many data row to send
+    TX_PIN = 5,
 };
-
 
 // ------------
 
@@ -173,53 +131,142 @@ const uint8_t TEMP_SAMPLE_COUNT = 16;
 
 // below this voltage (mV), we
 // consider beiing in low battery level.
-const long LOW_BATTERY = 1100*3;
+const long LOW_BATTERY = 1100 * 3;
 
 // see https://playground.arduino.cc/Main/LM35HigherResolution
 #define AREF 1.103800587
-#define TEMPERATURE_RATIO   (AREF / 1024.0 * 100.0)
+#define TEMPERATURE_RATIO (AREF / 1024.0 * 100.0)
 
-// constants for 433Mhz emitter
-#define TX_PIN  5 //pin where your transmitter is connected
-
-uint8_t OREGON_TYPE[] = {0x1A,0x2D}; // inside temp
+uint8_t OREGON_TYPE[] = {0x1A, 0x2D}; // inside temp
 #define COMMAND_REPEAT_COUNT 5
 #define OREGON_ID 0xBC
 Oregon oregon(LED_PIN, TX_PIN, COMMAND_REPEAT_COUNT);
-Oregon::Message message;
+
+#define rfxSensorID 13
+x10rf myx10 = x10rf(TX_PIN, LED_PIN, 3);
 
 // emit each 5 minutes (how many 8sec watchdog wakeups)
-const uint8_t SLEEP_DELAY_SECOND = (uint8_t)((5*60) / 8);
+const uint8_t SLEEP_DELAY_SECOND = (uint8_t)((5 * 60) / 8);
 volatile uint8_t _sleepDelayCounter = SLEEP_DELAY_SECOND;
 
-long readVcc();
-
 //============================================================================
-enum SensorSignals {
+enum SensorSignals
+{
     SEND_SIG = Q_USER_SIG,
     EMISSION_FINISHED_SIG,
     SENSE_SIG,
-
 };
 
-$declare(AOs::Sensor)
-$define(AOs::Sensor)
+class TinySensor
+{
+public:
+    void ReadTemperature()
+    {
+        digitalWrite(PERIPH_VCC_PIN, HIGH);
+        analogReference(INTERNAL);
 
-Sensor AO_Sensor;
+        // http://www.ti.com/lit/ds/symlink/lm35.pdf p.12
+        // (startup response)
+        delay(30);
+
+        uint16_t accumulator = 0;
+        double analogVal = 0;
+
+        // first read is usually false
+        // make a blank read
+        analogRead(ANALOG_TEMP_SENSOR_PIN);
+
+        // message length is fixed
+        for (uint8_t j = 0; j &lt; TEMP_SAMPLE_COUNT; ++j)
+        {
+            accumulator += analogRead(ANALOG_TEMP_SENSOR_PIN);
+        }
+
+        analogVal = (accumulator &gt;&gt; 4);
+
+        // the value is adjusted with Aref value for each sensor module.
+        _message.temperature = analogVal * TEMPERATURE_RATIO;
+    }
+
+    void SendBatteryLevel()
+    {
+        myx10.RFXmeter(rfxSensorID, 0, _rawBattery);
+    }
+
+    void SendTemperature()
+    {
+        digitalWrite(LED_PIN, HIGH);
+        oregon.Emit(OREGON_TYPE, Oregon::Channel::ONE, OREGON_ID, _message);
+    }
+
+    void ReadVcc()
+    {
+
+        byte ADMUX_backup = ADMUX;
+// Read 1.1V reference against AVcc
+// set the reference to Vcc and the measurement to the internal 1.1V reference
+#if defined(__AVR_ATmega32U4__) || defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
+        ADMUX = _BV(REFS0) | _BV(MUX4) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+#elif defined(__AVR_ATtiny24__) || defined(__AVR_ATtiny44__) || defined(__AVR_ATtiny84__)
+        ADMUX = _BV(MUX5) | _BV(MUX0);
+#elif defined(__AVR_ATtiny25__) || defined(__AVR_ATtiny45__) || defined(__AVR_ATtiny85__)
+        ADMUX = _BV(MUX3) | _BV(MUX2);
+#else
+        ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+#endif
+
+        delay(2);            // Wait for Vref to settle
+        ADCSRA |= _BV(ADSC); // Start conversion
+        while (bit_is_set(ADCSRA, ADSC))
+            ; // measuring
+
+        // scale_constant = internal1.1Ref * 1023 * 1000
+        // internal1.1Ref = 1.1 * Vcc1 (per voltmeter) / Vcc2 (per readVcc() function)
+
+        long result = 1126400L / ADC; // Calculate Vcc (in mV); 1126400 = 1.1*1024*1000
+
+        ADMUX = ADMUX_backup;
+        delay(2);
+
+#ifdef TRACE
+        Serial.print(&quot;VCC: &quot;);
+        Serial.print(result);
+        Serial.println(&quot;mV&quot;);
+#endif
+
+        _rawBattery = result;
+        _message.battery = (result &lt; LOW_BATTERY) ? 0 : 1;
+    }
+
+    void ToString()
+    {
+        Serial.println(F(&quot;Temp sensor data: &quot;));
+        Serial.print(&quot;Temperature: &quot;);
+        Serial.println(_message.temperature);
+    }
+
+private:
+    uint16_t _rawBattery;
+    Oregon::Message _message;
+};
+
+TinySensor tinySensor;
+
+$declare(AOs::Sensor)
+    $define(AOs::Sensor)
+
+        Sensor AO_Sensor;
 
 // QF_active[] array defines all active object control blocks ----------------
 static QEvt l_sensorQSto[10]; // Event queue storage for Sensor
 
 QActiveCB const Q_ROM QF_active[] = {
-  { (QActive *)0,           (QEvt *)0,        0U                  },
-  { (QActive *)&amp;AO_Sensor,  l_sensorQSto,     Q_DIM(l_sensorQSto) }
-};
+    {(QActive *)0, (QEvt *)0, 0U},
+    {(QActive *)&amp;AO_Sensor, l_sensorQSto, Q_DIM(l_sensorQSto)}};
 
 void PrintSensorData()
 {
-    Serial.println(F(&quot;Temp sensor data: &quot;));
-    Serial.print(&quot;Temperature: &quot;) ; Serial.println(AO_Sensor.m_Message.temperature);
-
+    tinySensor.ToString();
 }
 
 void PrintInfo()
@@ -236,88 +283,52 @@ void PrintInfo()
 
     Serial.print(F(&quot;State machine ticks/s: &quot;));
     Serial.println(BSP_TICKS_PER_SEC);
-
-}
-
-long readVcc() {
-
-  byte ADMUX_backup = ADMUX;
-  // Read 1.1V reference against AVcc
-  // set the reference to Vcc and the measurement to the internal 1.1V reference
-  #if defined(__AVR_ATmega32U4__) || defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
-    ADMUX = _BV(REFS0) | _BV(MUX4) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
-  #elif defined (__AVR_ATtiny24__) || defined(__AVR_ATtiny44__) || defined(__AVR_ATtiny84__)
-    ADMUX = _BV(MUX5) | _BV(MUX0);
-  #elif defined (__AVR_ATtiny25__) || defined(__AVR_ATtiny45__) || defined(__AVR_ATtiny85__)
-    ADMUX = _BV(MUX3) | _BV(MUX2);
-  #else
-    ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
-  #endif
-
-  delay(2); // Wait for Vref to settle
-  ADCSRA |= _BV(ADSC); // Start conversion
-  while (bit_is_set(ADCSRA,ADSC)); // measuring
-
-  uint8_t low  = ADCL; // must read ADCL first - it then locks ADCH  
-  uint8_t high = ADCH; // unlocks both
-
-  long result = (high&lt;&lt;8) | low;
-
-  // scale_constant = internal1.1Ref * 1023 * 1000
-  // internal1.1Ref = 1.1 * Vcc1 (per voltmeter) / Vcc2 (per readVcc() function)
-
-  result = 1129188L / result; // Calculate Vcc (in mV); 1125300 = 1.1*1023*1000
-
-  ADMUX= ADMUX_backup;
-  delay(2);
-
-  return result; // Vcc in millivolts
-}
-
-void setupWdt()
-{
-    cli();
-    wdt_reset();
-    MCUSR &amp;= ~(1&lt;&lt;WDRF);
-    WDTCSR |= (1&lt;&lt;WDCE) | (1&lt;&lt;WDE);
-    WDTCSR = (1 &lt;&lt; WDP3)|(1 &lt;&lt; WDP0)| ( 1 &lt;&lt; WDIE); // 8 sec, interrupts
-    sei();
 }
 
 //............................................................................
-void setup() {
-    
-    setupWdt();
+void setup()
+{
+
+    cli();
+    wdt_reset();
+    MCUSR &amp;= ~(1 &lt;&lt; WDRF);
+    WDTCSR |= (1 &lt;&lt; WDCE) | (1 &lt;&lt; WDE);
+    WDTCSR = (1 &lt;&lt; WDP3) | (1 &lt;&lt; WDP0) | (1 &lt;&lt; WDIE); // 8 sec, interrupts
+    sei();
 
     pinMode(13, OUTPUT);
     digitalWrite(13, LOW);
 
-    pinMode(LED_PIN, OUTPUT);        // set the LED-PIN pin to output
+    pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
     pinMode(PERIPH_VCC_PIN, OUTPUT);
     digitalWrite(PERIPH_VCC_PIN, 0);
 
-    Serial.begin(57600);   // set the highest stanard baud rate of 115200 bps (mini pro uses x2)
+    Serial.begin(57600); // 115200: mini pro uses x2
 
     PrintInfo();
 
     // initialize the QF-nano framework
     QF_init(Q_DIM(QF_active));
     QActive_ctor(&amp;AO_Sensor.super, Q_STATE_CAST(&amp;Sensor_initial));
-
 }
 
 //
-void loop() {
+void loop()
+{
     QF_run(); // run the QP-nano application
 }
 
 ISR(WDT_vect)
 {
     WDTCSR |= (1 &lt;&lt; WDIE);
-    if(_sleepDelayCounter == 0)
+    if (_sleepDelayCounter == 0)
     {
         _sleepDelayCounter = SLEEP_DELAY_SECOND;
+
+        digitalWrite(LED_PIN, HIGH);
+        digitalWrite(PERIPH_VCC_PIN, HIGH);
+
         QACTIVE_POST_ISR((QMActive *)&amp;AO_Sensor, SENSE_SIG, 0U);
     }
     else
@@ -326,32 +337,35 @@ ISR(WDT_vect)
     }
 }
 
-ISR(TIMER2_COMPA_vect) {
-    if (Serial.available() &gt; 0) {
-        switch (Serial.read()) { // read the incoming byte
-            case 'p':
-            case 'P':
-            {
-               PrintInfo(); 
-               break;
-            }
-            case 'd':
-            case 'D':
-            {
-               PrintSensorData();
-               break;
-            }
-       }
+ISR(TIMER2_COMPA_vect)
+{
+    if (Serial.available() &gt; 0)
+    {
+        switch (Serial.read())
+        { // read the incoming byte
+        case 'p':
+        case 'P':
+        {
+            PrintInfo();
+            break;
+        }
+        case 'd':
+        case 'D':
+        {
+            PrintSensorData();
+            break;
+        }
+        }
     }
 
     QF_tickXISR(0);
-
 }
 
 //============================================================================
 
 // QF callbacks...
-void QF_onStartup(void) {
+void QF_onStartup(void)
+{
 
 #ifdef TRACE
     Serial.println(F(&quot;QF_onStartup&quot;));
@@ -359,27 +373,28 @@ void QF_onStartup(void) {
 
     // set Timer2 in CTC mode, 1/1024 prescaler, start the timer ticking...
     TCCR2A = (1U &lt;&lt; WGM21) | (0U &lt;&lt; WGM20);
-    TCCR2B = (1U &lt;&lt; CS22 ) | (1U &lt;&lt; CS21) | (1U &lt;&lt; CS20); // 1/2^10
-    ASSR  &amp;= ~(1U &lt;&lt; AS2);
+    TCCR2B = (1U &lt;&lt; CS22) | (1U &lt;&lt; CS21) | (1U &lt;&lt; CS20); // 1/2^10
+    ASSR &amp;= ~(1U &lt;&lt; AS2);
     TIMSK2 = (1U &lt;&lt; OCIE2A); // enable TIMER2 compare Interrupt
-    TCNT2  = 0U;
+    TCNT2 = 0U;
 
     // set the output-compare register based on the desired tick frequency
-    OCR2A  = (F_CPU / BSP_TICKS_PER_SEC / 1024U) - 1U;
+    OCR2A = (F_CPU / BSP_TICKS_PER_SEC / 1024U) - 1U;
 }
 
 //............................................................................
-void QV_onIdle(void) {   // called with interrupts DISABLED
+void QV_onIdle(void)
+{ // called with interrupts DISABLED
 
 #ifdef TRACE
     Serial.println(F(&quot;QV_onIdle&quot;));
 #endif
 
     Serial.flush();
-    // Put the CPU and peripherals to the low-power mode. You might
-    // need to customize the clock management for your application,
-    // see the datasheet for your particular AVR MCU.
     set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+
+    digitalWrite(LED_PIN, LOW);
+    digitalWrite(PERIPH_VCC_PIN, LOW);
 
     // Shutdown all peripherals but watchdog.
     // It will shut down statemachine heartbeat until
@@ -401,7 +416,8 @@ void QV_onIdle(void) {   // called with interrupts DISABLED
 }
 
 //............................................................................
-void Q_onAssert(char const Q_ROM * const file, int line) {
+void Q_onAssert(char const Q_ROM *const file, int line)
+{
 
 #ifdef TRACE
     // implement the error-handling policy for your application!!!
@@ -411,7 +427,7 @@ void Q_onAssert(char const Q_ROM * const file, int line) {
     Serial.print(line);
 #endif
     QF_INT_DISABLE(); // disable all interrupts
-    QF_RESET();  // reset the CPU
+    QF_RESET();       // reset the CPU
 }</text>
   </file>
   <file name="oregon.h">
