@@ -2,6 +2,8 @@
 
 #include <qpn.h>     // QP-nano framework
 #include <Arduino.h> // Arduino API
+#include <avr/sleep.h>
+#include <avr/power.h>
 
 #define OREGON_MODE 0
 #include <oregon.h> // 433Mhz transmission library
@@ -9,8 +11,7 @@
 #include <avr/wdt.h>
 
 // define to println() many information
-#define TRACE 1
-
+#define TRACE 0
 // ------------
 
 // number of system clock ticks in one second
@@ -46,9 +47,12 @@ const long LOW_BATTERY = 1100 * 3;
 #define TEMPERATURE_RATIO (AREF / 1024.0 * 100.0)
 
 // emit each 5 minutes (how many 8sec watchdog wakeups)
-const uint8_t SLEEP_DELAY_SECOND = (uint8_t)((5 * 60) / 8);
+static const uint8_t SLEEP_DELAY_SECOND = (uint8_t)((5 * 60) / 8);
 
-uint8_t OREGON_TYPE[] = {0xEA, 0x4C}; // inside temp
+static const uint8_t OREGON_TYPE[] = {0xEA, 0x4C}; // inside temp
+
+#define UART_SPEED 115200
+
 #define OREGON_ID 0xBC
 #define COMMAND_REPEAT_COUNT 5
 
@@ -62,7 +66,7 @@ public:
 #if defined(__AVR_ATmega32U4__)
                 MCUCR |= (1 << JTD);
 #endif
-                Serial.begin(57600);
+                Serial.begin(UART_SPEED);
 
                 _oregon.setType(_oregonMessage, OREGON_TYPE);
                 _oregon.setChannel(_oregonMessage, Oregon::Channel::ONE);
@@ -76,24 +80,27 @@ public:
 
                 digitalWrite(13, LOW);
 
+                PrintInfo();
+
                 // the state machine will
                 // drop in SENSING state
                 // after boot
                 digitalWrite(LED_PIN, HIGH);
                 digitalWrite(PERIPH_VCC_PIN, HIGH);
-                PrintInfo();
         }
 
-        inline void BeforeIdle()
+        inline void SetupWatchdog()
         {
-                // clear various "reset" flags
-                MCUSR = 0;
 
                 cli();
+                wdt_reset();
+
+                // timed sequence
                 WDTCSR |= (1 << WDCE) | (1 << WDE);
+
                 // 8 seconds duration, interrupt
                 WDTCSR = (1 << WDIE) | (1 << WDP3) | (1 << WDP0);
-                wdt_reset();
+
 #if defined(__AVR_ATmega328P__)
                 // turn off brown‐out enable in software
                 MCUCR = (1 << BODS) | (1 << BODSE);
@@ -144,20 +151,19 @@ public:
 
         inline void SuspendHeartbeat()
         {
-#if defined(__AVR_ATmega328P__)
-                TIMSK2 &= ~(1U << OCIE2A); // cut heartbeat to avoid IT during transmission
-
-#elif defined(__AVR_ATmega32U4__)
-                TIMSK3 &= ~(1U << OCIE3A);
+#if defined(__AVR_ATmega32U4__)
+                PRR1 &= ~(1U << PRTIM3);
+#elif defined(__AVR_ATmega328P__)
+                PRR &= ~(1U << PRTIM2);
 #endif
         }
+
         inline void ResumeHeartbeat()
         {
-#if defined(__AVR_ATmega328P__)
-                TIMSK2 |= (1U << OCIE2A); // re-enable heartbeat
-
-#elif defined(__AVR_ATmega32U4__)
-                TIMSK3 |= (1U << OCIE3A);
+#if defined(__AVR_ATmega32U4__)
+                PRR1 |= (1U << PRTIM3);
+#elif defined(__AVR_ATmega328P__)
+                PRR |= (1U << PRTIM2);
 #endif
         }
 
@@ -182,6 +188,34 @@ public:
 
 #ifdef TRACE
                 Serial.println(F("Temperature sent"));
+                _delay_ms(30);
+#endif
+        }
+
+        inline void DeepSleep()
+        {
+#ifdef TRACE
+                Serial.println(F("Enter DeepSleep"));
+                _delay_ms(30);
+#endif
+                SetupWatchdog();
+                set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+                uint8_t sleepDelayCounter = SLEEP_DELAY_SECOND;
+                PowerDown();
+                do
+                {
+                        sleep_enable();
+                        sei();
+                        sleep_cpu();
+                        sleep_disable();
+                        SetupWatchdog();
+                        --sleepDelayCounter;
+                } while (sleepDelayCounter > 0);
+                wdt_disable();
+                PowerUp();
+#ifdef TRACE
+                Serial.println(F("Exit DeepSleep"));
+                _delay_ms(30);
 #endif
         }
 
@@ -238,20 +272,20 @@ public:
                 ADCSRA |= (1U << ADEN);
 
 #elif defined(__AVR_ATmega328P__)
-                PRR &= (1U << PRTWI);
-                PRR &= (1U << PRTIM2);
-                PRR &= (1U << PRTIM0);
-                PRR &= (1U << PRTIM1);
-                PRR &= (1U << PRSPI);
-                PRR &= (1U << PRUSART0);
+                power_usart0_enable();
+                power_timer0_enable(); // useless
+                power_timer1_enable(); // useless
+                power_timer2_enable();
+                power_spi_enable(); // useless
+                power_twi_enable();
+                power_adc_enable();
                 ADCSRA |= (1U << ADEN);
-                PRR &= ~(1U << PRADC);
 
 #endif
                 digitalWrite(LED_PIN, HIGH);
                 digitalWrite(PERIPH_VCC_PIN, HIGH);
 
-                Serial.begin(57600);
+                Serial.begin(UART_SPEED);
                 _x10.begin();
 
                 // http://www.ti.com/lit/ds/symlink/lm35.pdf p.12
@@ -261,7 +295,7 @@ public:
 
         inline void PowerDown()
         {
-
+                delay(200);
                 digitalWrite(LED_PIN, LOW);
                 digitalWrite(PERIPH_VCC_PIN, LOW);
 
@@ -278,14 +312,15 @@ public:
                 PRR1 |= (1 << PRUSART1);
 
 #elif defined(__AVR_ATmega328P__)
-                PRR |= (1U << PRTWI);
-                PRR |= (1U << PRTIM2);
-                PRR |= (1U << PRTIM0);
-                PRR |= (1U << PRTIM1);
-                PRR |= (1U << PRSPI);
-                PRR |= (1U << PRUSART0);
+                Serial.end();
+                power_usart0_disable();
+                power_timer0_disable(); // useless
+                power_timer1_disable(); // useless
+                power_timer2_disable();
+                power_spi_disable(); // useless
+                power_twi_disable();
                 ADCSRA &= ~(1U << ADEN);
-                PRR |= (1U << PRADC);
+                power_adc_disable();
 
 #endif
         }
@@ -313,7 +348,6 @@ public:
                 ASSR &= ~(1U << AS2);
                 TIMSK2 = (1U << OCIE2A); // enable TIMER2 compare Interrupt
                 TCNT2 = 0U;
-
                 // set the output-compare register based on the desired tick frequency
                 OCR2A = (F_CPU / BSP_TICKS_PER_SEC / 1024U) - 1U;
 
@@ -334,13 +368,15 @@ public:
 
                 Serial.print(F("State machine ticks/s: "));
                 Serial.println(BSP_TICKS_PER_SEC);
+
+                _delay_ms(30);
         }
 
 private:
         float _temperature;
         long _rawBattery;
         Oregon _oregon;
-        x10rf _x10 = x10rf(TX_PIN, LED_PIN, COMMAND_REPEAT_COUNT);
+        x10rf _x10 = x10rf(TX_PIN, 0, COMMAND_REPEAT_COUNT);
 
         // Buffer for Oregon message
 #if OREGON_MODE == MODE_0

@@ -4,106 +4,81 @@
  <package name="AOs" stereotype="0x02">
   <class name="Sensor" superclass="qpn::QActive">
    <statechart properties="0x01">
-    <initial target="../1">
-     <initial_glyph conn="46,7,4,0,5">
+    <initial target="../3">
+     <initial_glyph conn="96,11,4,0,5">
       <action box="0,-2,10,2"/>
      </initial_glyph>
     </initial>
-    <state name="Active">
+    <state name="DeepSleep">
      <entry>#ifdef TRACE
-  Serial.println(&quot;Enter Active&quot;);
+Serial.println(&quot;Enter Idle&quot;);
+_delay_ms(30);
 #endif
-</entry>
+
+tinySensor.DeepSleep();
+
+QACTIVE_POST(&amp;me-&gt;super, WAKEUP_SIG, 0U);</entry>
      <exit>#ifdef TRACE
-    Serial.println(&quot;Exit Active&quot;);
+Serial.println(&quot;Exit Idle&quot;);
+_delay_ms(30);
 #endif</exit>
-     <initial target="../2/1">
-      <initial_glyph conn="37,16,5,0,28,8">
-       <action box="0,-2,10,2"/>
-      </initial_glyph>
-     </initial>
-     <state name="Idle">
-      <entry>#ifdef TRACE
-  Serial.println(&quot;Enter Idle&quot;);
-  tinySensor.PowerDown();
-#endif</entry>
-      <exit>#ifdef TRACE
-  Serial.println(&quot;Exit Idle&quot;);
-  tinySensor.PowerUp();
-#endif</exit>
-      <tran trig="SENSE" target="../../2/1">
-       <tran_glyph conn="36,30,1,3,20">
-        <action box="1,-3,10,2"/>
-       </tran_glyph>
-      </tran>
-      <state_glyph node="18,26,18,12">
-       <entry box="1,2,6,2"/>
-       <exit box="1,4,4,2"/>
-      </state_glyph>
-     </state>
-     <state name="Powered">
-      <entry>#ifdef TRACE
-    Serial.println(F(&quot;Enter Powered&quot;));
-#endif</entry>
-      <exit>#ifdef TRACE
-    Serial.println(F(&quot;Exit Powered&quot;));
-#endif
-
-</exit>
-      <state name="Sending">
-       <entry brief="Transmit all sensors information">#ifdef TRACE
+     <tran trig="WAKEUP" target="../../3">
+      <tran_glyph conn="71,21,1,3,13">
+       <action box="3,-3,10,2"/>
+      </tran_glyph>
+     </tran>
+     <state_glyph node="53,17,18,12">
+      <entry box="1,2,6,2"/>
+      <exit box="1,4,4,2"/>
+     </state_glyph>
+    </state>
+    <state name="Sending">
+     <entry brief="Transmit all sensors information">#ifdef TRACE
     Serial.println(F(&quot;Enter Sending&quot;));
+    _delay_ms(30);
 #endif
 
-tinySensor.SendTemperature();
 tinySensor.SendBatteryLevel();
+tinySensor.SendTemperature();
 
-QACTIVE_POST(&amp;me-&gt;super, EMISSION_FINISHED_SIG, me-&gt;super.prio);</entry>
-       <exit>#ifdef TRACE
+QACTIVE_POST(&amp;me-&gt;super, SLEEP_SIG, 0U);</entry>
+     <exit>#ifdef TRACE
     Serial.println(F(&quot;Exit Sending&quot;));
-
+    _delay_ms(30);
 #endif</exit>
-       <tran trig="EMISSION_FINISHED" target="../../../1">
-        <tran_glyph conn="70,49,3,2,-49,-11">
-         <action box="-18,1,16,2"/>
-        </tran_glyph>
-       </tran>
-       <state_glyph node="70,43,30,11">
-        <entry box="1,2,26,3"/>
-        <exit box="1,5,6,2"/>
-       </state_glyph>
-      </state>
-      <state name="Sensing">
-       <entry brief="Sense and save">#ifdef TRACE
+     <tran trig="SLEEP" target="../../1">
+      <tran_glyph conn="80,39,3,2,-24,-10">
+       <action box="-18,-3,16,2"/>
+      </tran_glyph>
+     </tran>
+     <state_glyph node="80,35,30,11">
+      <entry box="1,2,26,3"/>
+      <exit box="1,5,6,2"/>
+     </state_glyph>
+    </state>
+    <state name="Sensing">
+     <entry brief="Sense and save">#ifdef TRACE
   Serial.println(F(&quot;Enter Sensing&quot;));
+  _delay_ms(30);
 #endif
 
 tinySensor.ReadTemperature();
 tinySensor.ReadVcc();
 
-QACTIVE_POST(&amp;me-&gt;super, SEND_SIG, me-&gt;super.prio);</entry>
-       <exit>#ifdef TRACE
+QACTIVE_POST(&amp;me-&gt;super, DATA_READY_SIG, 0U);</entry>
+     <exit>#ifdef TRACE
     Serial.println(F(&quot;Exit Sensing&quot;));
+    _delay_ms(30);
 #endif
 </exit>
-       <tran trig="SEND" target="../../0">
-        <tran_glyph conn="68,33,2,0,6,18,4">
-         <action box="1,2,12,2"/>
-        </tran_glyph>
-       </tran>
-       <state_glyph node="56,24,27,9">
-        <entry box="1,2,23,2"/>
-        <exit box="1,4,6,2"/>
-       </state_glyph>
-      </state>
-      <state_glyph node="46,20,61,37">
-       <entry box="1,2,6,2"/>
-       <exit box="1,4,6,2"/>
-      </state_glyph>
-     </state>
-     <state_glyph node="14,12,100,48">
-      <entry box="1,2,22,2"/>
-      <exit box="1,4,22,8"/>
+     <tran trig="DATA_READY" target="../../2">
+      <tran_glyph conn="96,25,2,0,10">
+       <action box="1,3,12,2"/>
+      </tran_glyph>
+     </tran>
+     <state_glyph node="84,16,27,9">
+      <entry box="1,2,23,2"/>
+      <exit box="1,4,6,2"/>
      </state_glyph>
     </state>
     <state_diagram size="147,82"/>
@@ -120,17 +95,15 @@ QACTIVE_POST(&amp;me-&gt;super, SEND_SIG, me-&gt;super.prio);</entry>
 
 TinySensor tinySensor;
 
-
 Q_DEFINE_THIS_MODULE(&quot;sensor&quot;)
 
 //============================================================================
 enum SensorSignals
 {
-    SEND_SIG = Q_USER_SIG,
-    EMISSION_FINISHED_SIG,
-    SENSE_SIG,
+    DATA_READY_SIG = Q_USER_SIG,
+    SLEEP_SIG,
+    WAKEUP_SIG,
 };
-
 
 $declare(AOs::Sensor)
 $define(AOs::Sensor)
@@ -138,34 +111,21 @@ $define(AOs::Sensor)
 Sensor AO_Sensor;
 
 //...................Interrupt handlers......................................
-
-volatile uint8_t _sleepDelayCounter = SLEEP_DELAY_SECOND;
-
 ISR(WDT_vect)
 {
-    wdt_disable();
-    if (_sleepDelayCounter == 0)
-    {
-        _sleepDelayCounter = SLEEP_DELAY_SECOND;
-        QACTIVE_POST_ISR((QMActive *)&amp;AO_Sensor, SENSE_SIG, 0U);
-    }
-    else
-    {
-        --_sleepDelayCounter;
-    }
+// just for wakeup. See DeepSleep state
 }
 
 #if defined(__AVR_ATmega32U4__)
 ISR(TIMER3_COMPA_vect)
 #elif defined(__AVR_ATmega328P__)
 ISR(TIMER2_COMPA_vect)
-#endif 
+#endif
 {
     QF_tickXISR(0);
 }
 
 //............................................................................
-
 
 // QF_active[] array defines all active object control blocks ----------------
 static QEvt l_sensorQSto[10]; // Event queue storage for Sensor
@@ -174,23 +134,35 @@ QActiveCB const Q_ROM QF_active[] = {
     {(QActive *)0, (QEvt *)0, 0U},
     {(QActive *)&amp;AO_Sensor, l_sensorQSto, Q_DIM(l_sensorQSto)}};
 
-
 //............................................................................
 void setup()
 {
     wdt_disable();
+    tinySensor.Setup();
 
     // initialize the QF-nano framework
     QF_init(Q_DIM(QF_active));
     QActive_ctor(&amp;AO_Sensor.super, Q_STATE_CAST(&amp;Sensor_initial));
-
-    tinySensor.Setup();
 }
 
 //
 void loop()
 {
-    QF_run(); // run the QP-nano application
+    // For now the QP framework does not work.
+    // QF_run(); // run the QP-nano application
+
+    for(;;)
+    {
+        tinySensor.ReadVcc();
+        tinySensor.SendBatteryLevel();
+
+        tinySensor.ReadTemperature();
+        tinySensor.SendTemperature();
+
+        tinySensor.DeepSleep();
+    }
+
+
 }
 
 //============================================================================
@@ -200,23 +172,25 @@ void QF_onStartup(void)
 {
 
 #ifdef TRACE
-    Serial.println(F(&quot;QF_onStartup&quot;));
+    Serial.println(F(&quot;Enter QF_onStartup&quot;));
+    _delay_ms(30);
 #endif
 
     tinySensor.SetupHeatbeat();
+
+#ifdef TRACE
+    Serial.println(F(&quot;Exit QF_onStartup&quot;));
+    _delay_ms(30);
+#endif
+
 }
 
 //............................................................................
 void QV_onIdle(void)
-{ 
-
+{
     // called with interrupts DISABLED
-
-    tinySensor.BeforeIdle();
-    set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-    sei();
-    sleep_cpu ();
-    sleep_disable();
+    SMCR = (0 &lt;&lt; SM0) | (1 &lt;&lt; SE); // idle mode, adjust to your project
+    QV_CPU_SLEEP();  // atomically go to sleep and enable interrupts
 }
 
 //............................................................................
@@ -230,13 +204,11 @@ void Q_onAssert(char const Q_ROM *const file, int line)
     Serial.print(F(&quot;' at line&quot;));
     Serial.print(line, DEC);
 
-    for (uint32_t volatile i = 100000; i &gt; 0; --i) {
-    }
+    _delay_ms(1000);
 
 #endif
     QF_INT_DISABLE(); // disable all interrupts
     QF_RESET();       // reset the CPU
-
 }</text>
   </file>
  </directory>
