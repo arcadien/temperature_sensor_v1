@@ -43,8 +43,8 @@ const uint8_t TEMP_SAMPLE_COUNT = 16;
 const long LOW_BATTERY = 1100 * 3;
 
 // see https://playground.arduino.cc/Main/LM35HigherResolution
-#define AREF 1.103800587
-#define TEMPERATURE_RATIO (AREF / 1024.0 * 100.0)
+#define INTERNAL_1V1 1.103800587
+#define TEMPERATURE_RATIO (INTERNAL_1V1 / 1024.0 * 100.0)
 
 // emit each 5 minutes (how many 8sec watchdog wakeups)
 static const uint8_t SLEEP_DELAY_SECOND = (uint8_t)((5 * 60) / 8);
@@ -67,6 +67,7 @@ public:
                 MCUCR |= (1 << JTD);
 #endif
                 Serial.begin(UART_SPEED);
+                adc_setup();
 
                 _oregon.setType(_oregonMessage, OREGON_TYPE);
                 _oregon.setChannel(_oregonMessage, Oregon::Channel::ONE);
@@ -127,7 +128,7 @@ public:
 
                 _temperature = (accumulator >> 4);
 
-                // the value is adjusted with Aref value for each sensor module.
+                // the value is adjusted with INTERNAL_1V1 value for each sensor module.
                 _temperature *= TEMPERATURE_RATIO;
 
 #ifdef TRACE
@@ -227,12 +228,12 @@ public:
                 _delay_ms(2);        // Wait for Vref to settle
                 ADCSRA |= _BV(ADSC); // Start conversion
                 while (bit_is_set(ADCSRA, ADSC))
-                        ; // measuring
+                {
+                }
 
-                // scale_constant = internal1.1Ref * 1023 * 1000
+                // scale_constant = internal1.1Ref * 1024 * 1000
                 // internal1.1Ref = 1.1 * Vcc1 (per voltmeter) / Vcc2 (per readVcc() function)
-
-                long result = 1126400L / ADC; // Calculate Vcc (in mV); 1126400 = 1.1*1024*1000
+                long result = (INTERNAL_1V1 * 1024 * 1000) / ADC;
 
                 ADMUX = ADMUX_backup;
                 _delay_ms(2);
@@ -287,34 +288,6 @@ public:
 
                 Serial.begin(UART_SPEED);
                 _x10.begin();
-
-                // ADC setup
-                // adc init
-#if F_CPU > 12000000L
-// above 12mhz, prescale by 128, the highest prescaler available
-#define ADC_ARDUINO_PRESCALER B111
-#elif F_CPU >= 6000000L
-// 12 MHz / 64 ~= 188 KHz
-// 8 MHz / 64 = 125 KHz
-#define ADC_ARDUINO_PRESCALER B110
-#elif F_CPU >= 3000000L
-// 4 MHz / 32 = 125 KHz
-#define ADC_ARDUINO_PRESCALER B101
-#elif F_CPU >= 1500000L
-// 2 MHz / 16 = 125 KHz
-#define ADC_ARDUINO_PRESCALER B100
-#elif F_CPU >= 750000L
-// 1 MHz / 8 = 125 KHz
-#define ADC_ARDUINO_PRESCALER B011
-#elif F_CPU < 400000L
-// 128 kHz / 2 = 64 KHz -> This is the closest you can get, the prescaler is 2
-#define ADC_ARDUINO_PRESCALER B000
-#else                              //speed between 400khz and 750khz
-#define ADC_ARDUINO_PRESCALER B010 //prescaler of 4
-#endif
-
-                ADCSRA = (ADCSRA & ~((1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0))) | (ADC_ARDUINO_PRESCALER << ADPS0) | (1 << ADEN);
-                // enable a2d conversions
 
                 // http://www.ti.com/lit/ds/symlink/lm35.pdf p.12
                 // (startup response)
@@ -401,6 +374,34 @@ public:
         }
 
 private:
+        void adc_setup()
+        {
+#if F_CPU > 12000000L
+// above 12mhz, prescale by 128, the highest prescaler available
+#define ADC_ARDUINO_PRESCALER B111
+#elif F_CPU >= 6000000L
+// 12 MHz / 64 ~= 188 KHz
+// 8 MHz / 64 = 125 KHz
+#define ADC_ARDUINO_PRESCALER B110
+#elif F_CPU >= 3000000L
+// 4 MHz / 32 = 125 KHz
+#define ADC_ARDUINO_PRESCALER B101
+#elif F_CPU >= 1500000L
+// 2 MHz / 16 = 125 KHz
+#define ADC_ARDUINO_PRESCALER B100
+#elif F_CPU >= 750000L
+// 1 MHz / 8 = 125 KHz
+#define ADC_ARDUINO_PRESCALER B011
+#elif F_CPU < 400000L
+// 128 kHz / 2 = 64 KHz -> This is the closest you can get, the prescaler is 2
+#define ADC_ARDUINO_PRESCALER B000
+#else                              //speed between 400khz and 750khz
+#define ADC_ARDUINO_PRESCALER B010 //prescaler of 4
+#endif
+
+                ADCSRA = (ADCSRA & ~((1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0))) | (ADC_ARDUINO_PRESCALER << ADPS0) | (1 << ADEN);
+        }
+
         float _temperature;
         long _rawBattery;
         Oregon _oregon;
