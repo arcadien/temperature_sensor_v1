@@ -29,7 +29,7 @@
 #define PERIPH_VCC_PIN 10
 
 // the pin for 433Mhz data
-#define TX_PIN 5
+#define TX_PIN 5 // PB5
 
 // some constant for temperature sensor
 #define ANALOG_TEMP_SENSOR_PIN A0
@@ -287,6 +287,34 @@ public:
 
                 Serial.begin(UART_SPEED);
                 _x10.begin();
+
+                // ADC setup
+                // adc init
+#if F_CPU > 12000000L
+// above 12mhz, prescale by 128, the highest prescaler available
+#define ADC_ARDUINO_PRESCALER B111
+#elif F_CPU >= 6000000L
+// 12 MHz / 64 ~= 188 KHz
+// 8 MHz / 64 = 125 KHz
+#define ADC_ARDUINO_PRESCALER B110
+#elif F_CPU >= 3000000L
+// 4 MHz / 32 = 125 KHz
+#define ADC_ARDUINO_PRESCALER B101
+#elif F_CPU >= 1500000L
+// 2 MHz / 16 = 125 KHz
+#define ADC_ARDUINO_PRESCALER B100
+#elif F_CPU >= 750000L
+// 1 MHz / 8 = 125 KHz
+#define ADC_ARDUINO_PRESCALER B011
+#elif F_CPU < 400000L
+// 128 kHz / 2 = 64 KHz -> This is the closest you can get, the prescaler is 2
+#define ADC_ARDUINO_PRESCALER B000
+#else                              //speed between 400khz and 750khz
+#define ADC_ARDUINO_PRESCALER B010 //prescaler of 4
+#endif
+
+                ADCSRA = (ADCSRA & ~((1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0))) | (ADC_ARDUINO_PRESCALER << ADPS0) | (1 << ADEN);
+                // enable a2d conversions
 
                 // http://www.ti.com/lit/ds/symlink/lm35.pdf p.12
                 // (startup response)
