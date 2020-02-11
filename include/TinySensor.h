@@ -43,8 +43,19 @@ const uint8_t TEMP_SAMPLE_COUNT = 16;
 const long LOW_BATTERY = 1100 * 3;
 
 // see https://playground.arduino.cc/Main/LM35HigherResolution
+// internal1.1Ref = 1.1 * Vcc1 (per voltmeter) / Vcc2 (per readVcc() function below)
 #define INTERNAL_1V1 1.103800587
-#define TEMPERATURE_RATIO (INTERNAL_1V1 / 1024.0 * 100.0)
+#define INTERNAL_1V1_MV 1103.800587
+
+#define MV_PER_ADC_STEP_USING_INTERNAL_1V1_REF (INTERNAL_1V1_MV / 1023.)
+
+#define SCALE_FACTOR_FOR_VCC_AGAINST_1V1_REF (INTERNAL_1V1_MV * 1023.)
+
+
+// used to get a temperature x10, such as 20.5 degrees is 205.
+// it allow simpler computation of decimal part when building
+// the Oregon message
+#define TEMPERATURE_RATIO (INTERNAL_1V1 / 1023.0 * 100.0)
 
 // emit each 5 minutes (how many 8sec watchdog wakeups)
 static const uint8_t SLEEP_DELAY_SECOND = (uint8_t)((5 * 60) / 8);
@@ -230,10 +241,8 @@ public:
                 while (bit_is_set(ADCSRA, ADSC))
                 {
                 }
-
-                // scale_constant = internal1.1Ref * 1024 * 1000
-                // internal1.1Ref = 1.1 * Vcc1 (per voltmeter) / Vcc2 (per readVcc() function)
-                long result = (INTERNAL_1V1 * 1024 * 1000) / ADC;
+                uint16_t adc_value = ADC;
+                long result = SCALE_FACTOR_FOR_VCC_AGAINST_1V1_REF / adc_value;
 
                 ADMUX = ADMUX_backup;
                 _delay_ms(2);
